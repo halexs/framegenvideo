@@ -3,7 +3,7 @@ import subprocess
 import threading
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import numpy as np
 import torch
@@ -121,7 +121,6 @@ def generate():
         [
             "ffmpeg",
             "-y",
-            # Input 0: Raw video frames piped from python
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -132,14 +131,12 @@ def generate():
             "60",
             "-i",
             "-",
-            # Input 1: Original video file to source audio
             "-i",
             INPUT,
-            # Map video from Pipe (0:v) and Audio from File (1:a)
             "-map",
             "0:v",
             "-map",
-            "1:a?",  # ? means optional (won't crash if video has no audio track)
+            "1:a?",
             "-c:v",
             "h264_nvenc",
             "-pix_fmt",
@@ -150,7 +147,7 @@ def generate():
             "aac",
             "-b:a",
             "192k",
-            "-shortest",  # Sync video and audio lengths
+            "-shortest",
             "-f",
             "hls",
             "-hls_time",
@@ -195,17 +192,41 @@ def startup():
 app.mount("/hls", StaticFiles(directory=HLS_DIR), name="hls")
 
 
+@app.get("/original")
+def get_original():
+    """Serves the original un-interpolated video file."""
+    return FileResponse(INPUT, media_type="video/mp4")
+
+
 @app.get("/")
 def home():
     return HTMLResponse(
         """
 <!DOCTYPE html>
 <html>
+<head>
+    <title>RIFE Frame Generation Comparison</title>
+    <style>
+        body { font-family: sans-serif; background: #121212; color: #fff; text-align: center; margin: 20px; }
+        .container { display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-top: 20px; }
+        .card { background: #1e1e1e; padding: 15px; border-radius: 8px; }
+        video { width: 600px; border-radius: 4px; }
+    </style>
+</head>
 <body>
-<h1>RIFE Stream</h1>
-<video controls autoplay width="800">
-    <source src="/hls/stream.m3u8" type="application/x-mpegURL">
-</video>
+    <h1>RIFE Frame Generation Comparison</h1>
+    <div class="container">
+        <div class="card">
+            <h3>Original Video</h3>
+            <video controls autoplay muted loop src="/original"></video>
+        </div>
+        <div class="card">
+            <h3>RIFE Interpolated Stream (60 FPS)</h3>
+            <video controls autoplay width="600">
+                <source src="/hls/stream.m3u8" type="application/x-mpegURL">
+            </video>
+        </div>
+    </div>
 </body>
 </html>
 """
