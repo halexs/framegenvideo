@@ -9,6 +9,11 @@ from fastapi.staticfiles import StaticFiles
 import numpy as np
 import torch
 
+try:
+    import torchvision.io as tvio
+except ImportError:  # pragma: no cover - dependency may be absent in some environments
+    tvio = None
+
 from train_log.RIFE_HDv3 import Model
 
 INPUT = "input.mp4"
@@ -27,6 +32,9 @@ model.device()
 # Enable PyTorch CUDNN Benchmarking for static shape optimization
 torch.backends.cudnn.benchmark = True
 
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA is required for this server")
+
 print("GPU:", torch.cuda.get_device_name(0))
 
 
@@ -40,24 +48,25 @@ def pad_tensor(img):
     return img, h, w
 
 
+def prepare_frame_tensor(frame):
+    if isinstance(frame, np.ndarray):
+        frame = torch.from_numpy(frame).permute(2, 0, 1)
+
+    if frame.dim() == 3:
+        frame = frame.unsqueeze(0)
+
+    if frame.device.type != "cuda":
+        frame = frame.to("cuda", non_blocking=True)
+
+    if frame.dtype != torch.float32:
+        frame = frame.float() / 255.0
+
+    return frame
+
+
 def interpolate(frame1, frame2, scale_factor=0.5):
-    # Direct CUDA allocation without non-blocking wrapper overhead
-    img0 = (
-        torch.from_numpy(frame1)
-        .permute(2, 0, 1)
-        .unsqueeze(0)
-        .cuda()
-        .float()
-        / 255.0
-    )
-    img1 = (
-        torch.from_numpy(frame2)
-        .permute(2, 0, 1)
-        .unsqueeze(0)
-        .cuda()
-        .float()
-        / 255.0
-    )
+    img0 = prepare_frame_tensor(frame1)
+    img1 = prepare_frame_tensor(frame2)
 
     img0, h, w = pad_tensor(img0)
     img1, _, _ = pad_tensor(img1)
@@ -65,22 +74,36 @@ def interpolate(frame1, frame2, scale_factor=0.5):
     with torch.inference_mode():
         mid = model.inference(img0, img1, 0.5, scale_factor)
 
-    mid = mid[:, :, :h, :w]
-
-    mid = (
-        mid[0]
-        .clamp(0, 1)
-        .mul(255)
-        .to(torch.uint8)
-        .permute(1, 2, 0)
-        .cpu()
-        .numpy()
-    )
-
-    return mid
+    return mid[:, :, :h, :w].clamp(0, 1)
 
 
-def generate():
+def serialize_frame(frame):
+    if isinstance(frame, np.ndarray):
+        frame = torch.from_numpy(frame).permute(2, 0, 1)
+
+    if frame.dim() == 4:
+        frame = frame.squeeze(0)
+
+    if frame.dim() != 3:
+        raise ValueError(f"Expected a 3D frame tensor, got shape {tuple(frame.shape)}")
+
+    if frame.shape[0] == 3 and frame.shape[-1] != 3:
+        frame = frame.permute(1, 2, 0)
+    elif frame.shape[-1] != 3:
+        raise ValueError(f"Unsupported frame tensor shape {tuple(frame.shape)}")
+
+    if frame.dtype != torch.uint8:
+        frame = frame.mul(255.0).clamp(0, 255).to(torch.uint8)
+
+    frame = frame.contiguous()
+    if frame.device.type == "cuda":
+        frame = frame.to("cpu", non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+
+    return frame.numpy().tobytes()
+
+
+def probe_video_metadata(path):
     probe = (
         subprocess.check_output(
             [
@@ -90,26 +113,128 @@ def generate():
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=width,height",
+                "stream=width,height,r_frame_rate",
                 "-of",
                 "csv=s=x:p=0",
-                INPUT,
+                path,
             ]
         )
         .decode()
         .strip()
     )
 
-    width, height = map(int, probe.split("x"))
-    print(f"Input resolution: {width}x{height}")
+    parts = probe.split("x")
+    width = int(parts[0])
+    height = int(parts[1])
 
-    # Aggressive downscaling for flow computation on high resolutions
+    if len(parts) < 3:
+        fps = 30.0
+    elif "/" in parts[2]:
+        num, den = map(int, parts[2].split("/"))
+        fps = num / den if den != 0 else 30.0
+    else:
+        fps = float(parts[2])
+
+    return width, height, fps
+
+
+def generate():
+    width, height, fps = probe_video_metadata(INPUT)
+    print(f"Input resolution: {width}x{height} @ {fps:.2f} FPS")
+
     if width >= 2560 or height >= 1440:
         scale_factor = 0.5
         print("High resolution detected: Using scale_factor = 0.5")
     else:
         scale_factor = 1.0
         print("Standard resolution detected: Using scale_factor = 1.0")
+
+    encoder = subprocess.Popen(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(int(round(fps * 2))),
+            "-i",
+            "-",
+            "-i",
+            INPUT,
+            "-map",
+            "0:v",
+            "-map",
+            "1:a?",
+            "-c:v",
+            "h264_nvenc",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "p1",
+            "-tune",
+            "ll",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-f",
+            "hls",
+            "-hls_time",
+            "4",
+            "-hls_list_size",
+            "0",
+            f"{HLS_DIR}/stream.m3u8",
+        ],
+        stdin=subprocess.PIPE,
+        bufsize=10**8,
+    )
+
+    use_cuda_decode = False
+    if tvio is not None:
+        try:
+            tvio.set_video_backend("cuda")
+            video_frames, _, info = tvio.read_video(
+                INPUT,
+                pts_unit="sec",
+                output_format="TCHW",
+            )
+            if video_frames.numel() > 0:
+                video_frames = video_frames.to("cuda", non_blocking=True)
+                fps = info.get("video_fps", fps)
+                use_cuda_decode = True
+                print(
+                    f"Using TorchVision CUDA decode for {video_frames.shape[0]} frames"
+                )
+        except Exception as exc:  # pragma: no cover - environment dependent
+            print(f"Falling back to ffmpeg decode path: {exc}")
+
+    if use_cuda_decode:
+        prev_frame_gpu = None
+        prev_frame_uint8 = None
+
+        for idx in range(video_frames.shape[0]):
+            curr_frame_uint8 = video_frames[idx].to("cuda", non_blocking=True)
+            curr_frame_gpu = curr_frame_uint8.float() / 255.0
+
+            if prev_frame_gpu is not None:
+                mid = interpolate(prev_frame_gpu, curr_frame_gpu, scale_factor=scale_factor)
+                encoder.stdin.write(serialize_frame(prev_frame_uint8))
+                encoder.stdin.write(serialize_frame(mid))
+
+            prev_frame_gpu = curr_frame_gpu
+            prev_frame_uint8 = curr_frame_uint8
+
+        if prev_frame_uint8 is not None:
+            encoder.stdin.write(serialize_frame(prev_frame_uint8))
+
+        encoder.stdin.close()
+        encoder.wait()
+        return
 
     decoder = subprocess.Popen(
         [
@@ -129,54 +254,8 @@ def generate():
         bufsize=10**8,
     )
 
-    encoder = subprocess.Popen(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            f"{width}x{height}",
-            "-r",
-            "60",
-            "-i",
-            "-",
-            "-i",
-            INPUT,
-            "-map",
-            "0:v",
-            "-map",
-            "1:a?",
-            "-c:v",
-            "h264_nvenc",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "p1",  # Fastest NVENC Encoding Preset
-            "-tune",
-            "ll",  # Low Latency Tuning
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            "-f",
-            "hls",
-            "-hls_time",
-            "4",
-            "-hls_list_size",
-            "0",
-            f"{HLS_DIR}/stream.m3u8",
-        ],
-        stdin=subprocess.PIPE,
-        bufsize=10**8,
-    )
-
     frame_size = width * height * 3
 
-    # Thread-safe pipeline queues
     raw_queue = queue.Queue(maxsize=4)
     out_queue = queue.Queue(maxsize=8)
 
@@ -197,7 +276,6 @@ def generate():
             encoder.stdin.write(data)
             out_queue.task_done()
 
-    # Launch background I/O threads
     reader_thread = threading.Thread(target=read_frames, daemon=True)
     writer_thread = threading.Thread(target=write_frames, daemon=True)
     reader_thread.start()
@@ -212,14 +290,13 @@ def generate():
 
         if previous is not None:
             middle = interpolate(previous, frame, scale_factor=scale_factor)
-
-            out_queue.put(previous.tobytes())
-            out_queue.put(middle.tobytes())
+            out_queue.put(serialize_frame(previous))
+            out_queue.put(serialize_frame(middle))
 
         previous = frame
 
     if previous is not None:
-        out_queue.put(previous.tobytes())
+        out_queue.put(serialize_frame(previous))
 
     out_queue.put(None)
     writer_thread.join()
