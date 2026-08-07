@@ -1,3 +1,4 @@
+#!E:\StreamerFrames\.framegen\Scripts\python.exe
 import os
 import queue
 import subprocess
@@ -77,7 +78,7 @@ def interpolate(frame1, frame2, scale_factor=0.5):
     return mid[:, :, :h, :w].clamp(0, 1)
 
 
-def serialize_frame(frame):
+def serialize_frame(frame, pinned_buffer=None):
     if isinstance(frame, np.ndarray):
         frame = torch.from_numpy(frame).permute(2, 0, 1)
 
@@ -97,8 +98,15 @@ def serialize_frame(frame):
 
     frame = frame.contiguous()
     if frame.device.type == "cuda":
-        frame = frame.to("cpu", non_blocking=True)
+        if pinned_buffer is None or pinned_buffer.shape != frame.shape or pinned_buffer.dtype != torch.uint8:
+            pinned_buffer = torch.empty(frame.shape, dtype=torch.uint8, device="cpu", pin_memory=True)
+        pinned_buffer.copy_(frame, non_blocking=True)
         torch.cuda.current_stream().synchronize()
+        return pinned_buffer.numpy().tobytes()
+
+    if pinned_buffer is not None and pinned_buffer.shape == frame.shape and pinned_buffer.dtype == torch.uint8:
+        pinned_buffer.copy_(frame)
+        return pinned_buffer.numpy().tobytes()
 
     return frame.numpy().tobytes()
 
@@ -216,21 +224,22 @@ def generate():
     if use_cuda_decode:
         prev_frame_gpu = None
         prev_frame_uint8 = None
+        out_buffer = torch.empty((height, width, 3), dtype=torch.uint8, device="cpu", pin_memory=True)
 
         for idx in range(video_frames.shape[0]):
-            curr_frame_uint8 = video_frames[idx].to("cuda", non_blocking=True)
+            curr_frame_uint8 = video_frames[idx]
             curr_frame_gpu = curr_frame_uint8.float() / 255.0
 
             if prev_frame_gpu is not None:
                 mid = interpolate(prev_frame_gpu, curr_frame_gpu, scale_factor=scale_factor)
-                encoder.stdin.write(serialize_frame(prev_frame_uint8))
-                encoder.stdin.write(serialize_frame(mid))
+                encoder.stdin.write(serialize_frame(prev_frame_uint8, pinned_buffer=out_buffer))
+                encoder.stdin.write(serialize_frame(mid, pinned_buffer=out_buffer))
 
             prev_frame_gpu = curr_frame_gpu
             prev_frame_uint8 = curr_frame_uint8
 
         if prev_frame_uint8 is not None:
-            encoder.stdin.write(serialize_frame(prev_frame_uint8))
+            encoder.stdin.write(serialize_frame(prev_frame_uint8, pinned_buffer=out_buffer))
 
         encoder.stdin.close()
         encoder.wait()
@@ -258,6 +267,7 @@ def generate():
 
     raw_queue = queue.Queue(maxsize=4)
     out_queue = queue.Queue(maxsize=8)
+    out_buffer = torch.empty((height, width, 3), dtype=torch.uint8, device="cpu", pin_memory=True)
 
     def read_frames():
         while True:
@@ -290,13 +300,13 @@ def generate():
 
         if previous is not None:
             middle = interpolate(previous, frame, scale_factor=scale_factor)
-            out_queue.put(serialize_frame(previous))
-            out_queue.put(serialize_frame(middle))
+            out_queue.put(serialize_frame(previous, pinned_buffer=out_buffer))
+            out_queue.put(serialize_frame(middle, pinned_buffer=out_buffer))
 
         previous = frame
 
     if previous is not None:
-        out_queue.put(serialize_frame(previous))
+        out_queue.put(serialize_frame(previous, pinned_buffer=out_buffer))
 
     out_queue.put(None)
     writer_thread.join()
