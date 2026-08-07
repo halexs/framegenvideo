@@ -1,8 +1,10 @@
 #!E:\StreamerFrames\.framegen\Scripts\python.exe
+import argparse
 import os
 import queue
 import subprocess
 import threading
+import sys
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
@@ -146,8 +148,12 @@ def probe_video_metadata(path):
     return width, height, fps
 
 
-def generate():
-    width, height, fps = probe_video_metadata(INPUT)
+def generate(input_path=None, hls_dir=None):
+    input_path = input_path or INPUT
+    hls_dir = hls_dir or HLS_DIR
+    os.makedirs(hls_dir, exist_ok=True)
+
+    width, height, fps = probe_video_metadata(input_path)
     print(f"Input resolution: {width}x{height} @ {fps:.2f} FPS")
 
     if width >= 2560 or height >= 1440:
@@ -172,7 +178,7 @@ def generate():
             "-i",
             "-",
             "-i",
-            INPUT,
+            input_path,
             "-map",
             "0:v",
             "-map",
@@ -182,9 +188,17 @@ def generate():
             "-pix_fmt",
             "yuv420p",
             "-preset",
-            "p1",
+            "p4",
             "-tune",
             "ll",
+            "-rc",
+            "cbr",
+            "-bf",
+            "2",
+            "-maxrate",
+            "20M",
+            "-bufsize",
+            "20M",
             "-c:a",
             "aac",
             "-b:a",
@@ -196,7 +210,7 @@ def generate():
             "4",
             "-hls_list_size",
             "0",
-            f"{HLS_DIR}/stream.m3u8",
+            f"{hls_dir}/stream.m3u8",
         ],
         stdin=subprocess.PIPE,
         bufsize=10**8,
@@ -207,7 +221,7 @@ def generate():
         try:
             tvio.set_video_backend("cuda")
             video_frames, _, info = tvio.read_video(
-                INPUT,
+                input_path,
                 pts_unit="sec",
                 output_format="TCHW",
             )
@@ -251,7 +265,7 @@ def generate():
             "-hwaccel",
             "cuda",
             "-i",
-            INPUT,
+            input_path,
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -417,3 +431,20 @@ def home():
 </html>
 """
     )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate RIFE HLS output or run the FastAPI app.")
+    parser.add_argument("--input", default=INPUT, help="Input video path")
+    parser.add_argument("--hls-dir", default=HLS_DIR, help="Output HLS directory")
+    parser.add_argument("--generate-only", action="store_true", help="Generate HLS for the input and exit")
+    args = parser.parse_args()
+
+    if args.generate_only:
+        generate(args.input, args.hls_dir)
+    else:
+        try:
+            import uvicorn
+        except ImportError:
+            raise RuntimeError("uvicorn is required to run the app directly. Use `uvicorn rife_server:app` instead.")
+        uvicorn.run("rife_server:app", host="0.0.0.0", port=8000)

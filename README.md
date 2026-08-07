@@ -127,5 +127,51 @@ Optical Flow:
 
 Video Interpolation: 
 [DVF](https://github.com/lxx1991/pytorch-voxel-flow)  [TOflow](https://github.com/Coldog2333/pytoflow)  [SepConv](https://github.com/sniklaus/sepconv-slomo)  [DAIN](https://github.com/baowenbo/DAIN)  [CAIN](https://github.com/myungsub/CAIN)  [MEMC-Net](https://github.com/baowenbo/MEMC-Net)   [SoftSplat](https://github.com/sniklaus/softmax-splatting)  [BMBC](https://github.com/JunHeum/BMBC)  [EDSC](https://github.com/Xianhang/EDSC-pytorch)  [EQVI](https://github.com/lyh-18/EQVI) [RIFE](https://github.com/hzwer/arXiv2020-RIFE)
+
+## Running the StreamerFrames server (Windows)
+
+This repository includes a small FastAPI-based web server (server.py) and a RIFE HLS generator (rife_server.py). The server lists movies in E:\\Movies (or resolves the "Movies - Shortcut.lnk" file in the project root) and can play the original file or stream a RIFE-interpolated HLS version.
+
+Quick start (uses the provided virtualenv at `.framegen`):
+
+1. Open Command Prompt or PowerShell in the project folder.
+
+2. Start the server with the bundled batch script (uses `.framegen` Python):
+
+   - Double-click start_server.bat or run:
+
+     start_server.bat
+
+   - Or launch the PowerShell helper which opens a server window and your browser:
+
+     start_server.ps1
+
+3. The UI will be available at http://localhost:8000. Choose a movie and click "Normal" to play the original or "Framegen" to prepare and play the interpolated HLS stream.
+
+Manual start using the project virtualenv Python:
+
+- Run uvicorn directly from the venv:
+
+  .\\.framegen\\Scripts\\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8000
+
+Generate a framegen HLS stream manually:
+
+- Generate-only mode for testing (creates HLS in an output folder):
+
+  .\\.framegen\\Scripts\\python.exe rife_server.py --input "E:\\Movies\\MyMovie.mp4" --hls-dir "hls/MyMovie" --generate-only
+
+- The web UI will start generation automatically when you use the "Framegen" link for a movie.
+
+Auto-start on logon (optional):
+
+- Run create_schtask.bat as Administrator to register a scheduled task named "StreamerFramesServer" that runs start_server.bat at logon.
+
+Notes:
+
+- The scripts assume the virtualenv exists at `.framegen`. If you use a different venv, update start_server.bat / start_server.ps1 to point to the correct python.exe.
+- The RIFE generator requires a CUDA-enabled PyTorch (torch + torchvision built with CUDA). Ensure `.framegen` contains those packages.
+- If your environment requires additional environment variables or activation steps, update start_server.bat accordingly.
+
+If you want, I can also add a short section showing how to create a desktop shortcut or run the server as a Windows Service.
 #   f r a m e g e n v i d e o  
  
