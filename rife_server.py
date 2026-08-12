@@ -1,10 +1,12 @@
 #!E:\StreamerFrames\.framegen\Scripts\python.exe
 import argparse
+import json
 import os
 import queue
 import subprocess
 import threading
 import sys
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
@@ -148,6 +150,47 @@ def probe_video_metadata(path):
     return width, height, fps
 
 
+def load_resume_state(hls_dir, output_fps):
+    state_path = Path(hls_dir) / "resume_state.json"
+    if not state_path.exists():
+        existing_segments = sorted(Path(hls_dir).glob("stream*.ts"))
+        inferred_frames = 0
+        if existing_segments:
+            inferred_frames = len(existing_segments) * max(1, int(round(output_fps * 4)))
+        return {"output_frames_written": inferred_frames, "complete": False}
+
+    try:
+        with state_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            data.setdefault("output_frames_written", 0)
+            data.setdefault("complete", False)
+            return data
+    except Exception:
+        pass
+    return {"output_frames_written": 0, "complete": False}
+
+
+def save_resume_state(hls_dir, state):
+    state_path = Path(hls_dir) / "resume_state.json"
+    try:
+        with state_path.open("w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+    except Exception:
+        pass
+
+
+def write_frame_to_encoder(encoder, frame, state, hls_dir, skip_count, pinned_buffer=None):
+    if skip_count > 0:
+        return skip_count - 1
+
+    payload = serialize_frame(frame, pinned_buffer=pinned_buffer)
+    encoder.stdin.write(payload)
+    state["output_frames_written"] += 1
+    save_resume_state(hls_dir, state)
+    return 0
+
+
 def generate(input_path=None, hls_dir=None):
     input_path = input_path or INPUT
     hls_dir = hls_dir or HLS_DIR
@@ -163,6 +206,10 @@ def generate(input_path=None, hls_dir=None):
         scale_factor = 1.0
         print("Standard resolution detected: Using scale_factor = 1.0")
 
+    output_fps = int(round(fps * 2))
+    resume_state = load_resume_state(hls_dir, output_fps)
+    skip_count = resume_state["output_frames_written"]
+
     encoder = subprocess.Popen(
         [
             "ffmpeg",
@@ -174,7 +221,7 @@ def generate(input_path=None, hls_dir=None):
             "-s",
             f"{width}x{height}",
             "-r",
-            str(int(round(fps * 2))),
+            str(output_fps),
             "-i",
             "-",
             "-i",
@@ -210,6 +257,8 @@ def generate(input_path=None, hls_dir=None):
             "4",
             "-hls_list_size",
             "0",
+            "-hls_flags",
+            "append_list",
             f"{hls_dir}/stream.m3u8",
         ],
         stdin=subprocess.PIPE,
@@ -246,15 +295,38 @@ def generate(input_path=None, hls_dir=None):
 
             if prev_frame_gpu is not None:
                 mid = interpolate(prev_frame_gpu, curr_frame_gpu, scale_factor=scale_factor)
-                encoder.stdin.write(serialize_frame(prev_frame_uint8, pinned_buffer=out_buffer))
-                encoder.stdin.write(serialize_frame(mid, pinned_buffer=out_buffer))
+                skip_count = write_frame_to_encoder(
+                    encoder,
+                    prev_frame_uint8,
+                    resume_state,
+                    hls_dir,
+                    skip_count,
+                    pinned_buffer=out_buffer,
+                )
+                skip_count = write_frame_to_encoder(
+                    encoder,
+                    mid,
+                    resume_state,
+                    hls_dir,
+                    skip_count,
+                    pinned_buffer=out_buffer,
+                )
 
             prev_frame_gpu = curr_frame_gpu
             prev_frame_uint8 = curr_frame_uint8
 
         if prev_frame_uint8 is not None:
-            encoder.stdin.write(serialize_frame(prev_frame_uint8, pinned_buffer=out_buffer))
+            skip_count = write_frame_to_encoder(
+                encoder,
+                prev_frame_uint8,
+                resume_state,
+                hls_dir,
+                skip_count,
+                pinned_buffer=out_buffer,
+            )
 
+        resume_state["complete"] = True
+        save_resume_state(hls_dir, resume_state)
         encoder.stdin.close()
         encoder.wait()
         return
@@ -280,7 +352,6 @@ def generate(input_path=None, hls_dir=None):
     frame_size = width * height * 3
 
     raw_queue = queue.Queue(maxsize=4)
-    out_queue = queue.Queue(maxsize=8)
     out_buffer = torch.empty((height, width, 3), dtype=torch.uint8, device="cpu", pin_memory=True)
 
     def read_frames():
@@ -292,18 +363,8 @@ def generate(input_path=None, hls_dir=None):
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
             raw_queue.put(frame)
 
-    def write_frames():
-        while True:
-            data = out_queue.get()
-            if data is None:
-                break
-            encoder.stdin.write(data)
-            out_queue.task_done()
-
     reader_thread = threading.Thread(target=read_frames, daemon=True)
-    writer_thread = threading.Thread(target=write_frames, daemon=True)
     reader_thread.start()
-    writer_thread.start()
 
     previous = None
 
@@ -314,16 +375,37 @@ def generate(input_path=None, hls_dir=None):
 
         if previous is not None:
             middle = interpolate(previous, frame, scale_factor=scale_factor)
-            out_queue.put(serialize_frame(previous, pinned_buffer=out_buffer))
-            out_queue.put(serialize_frame(middle, pinned_buffer=out_buffer))
+            skip_count = write_frame_to_encoder(
+                encoder,
+                previous,
+                resume_state,
+                hls_dir,
+                skip_count,
+                pinned_buffer=out_buffer,
+            )
+            skip_count = write_frame_to_encoder(
+                encoder,
+                middle,
+                resume_state,
+                hls_dir,
+                skip_count,
+                pinned_buffer=out_buffer,
+            )
 
         previous = frame
 
     if previous is not None:
-        out_queue.put(serialize_frame(previous, pinned_buffer=out_buffer))
+        skip_count = write_frame_to_encoder(
+            encoder,
+            previous,
+            resume_state,
+            hls_dir,
+            skip_count,
+            pinned_buffer=out_buffer,
+        )
 
-    out_queue.put(None)
-    writer_thread.join()
+    resume_state["complete"] = True
+    save_resume_state(hls_dir, resume_state)
 
     encoder.stdin.close()
     encoder.wait()

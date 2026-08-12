@@ -1,6 +1,6 @@
 # PowerShell helper to start the StreamerFrames FastAPI server using the virtualenv Python
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$python = Join-Path $scriptDir ".framegen\Scripts\python.exe"
+$python = Join-Path $scriptDir "..\.framegen\Scripts\python.exe"
 
 if (!(Test-Path $python)) {
     Write-Error "Python not found at: $python"

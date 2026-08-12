@@ -3,6 +3,9 @@ import re
 import sys
 import subprocess
 import threading
+import time
+import json
+from collections import deque
 from pathlib import Path
 from urllib.parse import quote, unquote
 from fastapi import FastAPI, HTTPException, Request
@@ -87,10 +90,28 @@ def get_hls_dir(video_path: Path) -> Path:
 
 def is_hls_ready(video_path: Path) -> bool:
     hls_dir = get_hls_dir(video_path)
-    return (hls_dir / "stream.m3u8").exists()
+    if not (hls_dir / "stream.m3u8").exists():
+        return False
+
+    state_path = hls_dir / "resume_state.json"
+    if state_path.exists():
+        try:
+            import json
+
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            return bool(data.get("complete", False))
+        except Exception:
+            return False
+    return True
 
 
 generation_jobs: dict[str, dict] = {}
+
+
+def _tail_writer(deque_obj: deque, line: str, maxlen: int = 1000):
+    if line is None:
+        return
+    deque_obj.append(line)
 
 
 def run_framegen(video_path: Path) -> None:
@@ -105,27 +126,73 @@ def run_framegen(video_path: Path) -> None:
         str(hls_dir),
         "--generate-only",
     ]
+
+    # prepare log file
+    log_path = hls_dir / "generation.log"
+    logfile = open(log_path, "a", encoding="utf-8", buffering=1)
+
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
     )
 
     key = sanitize_name(str(video_path.relative_to(get_movies_root())))
+    tail = deque(maxlen=500)
+
     generation_jobs[key] = {
         "process": process,
-        "started": True,
+        "pid": process.pid,
+        "started_at": time.time(),
+        "status": "starting",
         "success": None,
-        "output": "",
+        "log_path": str(log_path),
+        "tail": tail,
     }
 
-    def monitor() -> None:
-        stdout, stderr = process.communicate()
-        generation_jobs[key]["output"] = stdout + stderr
-        generation_jobs[key]["success"] = process.returncode == 0
+    def _reader(pipe, name: str):
+        try:
+            for line in iter(pipe.readline, ""):
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                out = f"[{name}] {ts} {line}"
+                try:
+                    logfile.write(out)
+                except Exception:
+                    pass
+                _tail_writer(tail, out)
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
 
-    threading.Thread(target=monitor, daemon=True).start()
+    def _monitor():
+        generation_jobs[key]["status"] = "running"
+        stdout_thr = threading.Thread(target=_reader, args=(process.stdout, "OUT"), daemon=True)
+        stderr_thr = threading.Thread(target=_reader, args=(process.stderr, "ERR"), daemon=True)
+        stdout_thr.start()
+        stderr_thr.start()
+
+        rc = process.wait()
+        stdout_thr.join(timeout=1)
+        stderr_thr.join(timeout=1)
+
+        generation_jobs[key]["success"] = rc == 0
+        generation_jobs[key]["status"] = "done" if rc == 0 else "failed"
+        generation_jobs[key]["ended_at"] = time.time()
+
+        try:
+            logfile.write(f"[MONITOR] returncode={rc}\n")
+        except Exception:
+            pass
+        try:
+            logfile.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_monitor, daemon=True).start()
 
 
 @app.get("/")
@@ -183,6 +250,38 @@ def stream_video(name: str):
     }
     media_type = media_types.get(ext, "application/octet-stream")
     return FileResponse(video_path, media_type=media_type, filename=video_path.name)
+
+
+@app.get("/generation-status")
+def generation_status(name: str):
+    """Return status and tail logs for a generation job for the given video name (same encoding as /video name param)."""
+    video_path = get_video_path(name)
+    key = sanitize_name(str(video_path.relative_to(get_movies_root())))
+    job = generation_jobs.get(key)
+    if not job:
+        return {"status": "none", "hls_ready": is_hls_ready(video_path)}
+    tail = list(job.get("tail", []))
+    state_path = get_hls_dir(video_path) / "resume_state.json"
+    complete_state = False
+    if state_path.exists():
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            complete_state = bool(data.get("complete", False))
+        except Exception:
+            pass
+
+    info = {
+        "status": job.get("status"),
+        "pid": job.get("pid"),
+        "started_at": job.get("started_at"),
+        "ended_at": job.get("ended_at", None),
+        "success": job.get("success"),
+        "log_path": job.get("log_path"),
+        "tail": tail,
+        "hls_ready": is_hls_ready(video_path),
+        "complete": complete_state,
+    }
+    return info
 
 
 @app.get("/watch")
