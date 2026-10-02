@@ -9,8 +9,20 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import quote, unquote
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+
+SERVER_LOG_PATH = Path(__file__).resolve().parent / "server.log"
+
+
+def write_server_log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] {message}\n"
+    try:
+        with SERVER_LOG_PATH.open("a", encoding="utf-8", errors="ignore") as handle:
+            handle.write(line)
+    except Exception:
+        pass
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
 MOVIES_ROOT = Path("E:/Movies")
@@ -21,6 +33,19 @@ app = FastAPI()
 
 HLS_ROOT.mkdir(exist_ok=True)
 app.mount("/hls", StaticFiles(directory=HLS_ROOT), name="hls")
+write_server_log("StreamerFrames server initialized")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    write_server_log(f"Request {request.method} {request.url.path}?{request.url.query}")
+    try:
+        response = await call_next(request)
+        write_server_log(f"Response {request.method} {request.url.path} status={response.status_code}")
+        return response
+    except Exception as exc:
+        write_server_log(f"Exception during request {request.method} {request.url.path}: {exc}")
+        raise
 
 
 def resolve_shortcut_target(shortcut_path: Path) -> Path | None:
@@ -50,6 +75,7 @@ def get_movies_root() -> Path:
         return MOVIES_ROOT
     target = resolve_shortcut_target(MOVIES_SHORTCUT)
     if target and target.exists() and target.is_dir():
+        write_server_log(f"Resolved movies root via shortcut: {target}")
         return target
     raise FileNotFoundError(
         "Could not locate the movies directory. "
@@ -127,9 +153,13 @@ def run_framegen(video_path: Path) -> None:
         "--generate-only",
     ]
 
+    write_server_log(f"Starting framegen for {video_path} into {hls_dir}")
+    write_server_log(f"Command: {' '.join(command)}")
+
     # prepare log file
     log_path = hls_dir / "generation.log"
     logfile = open(log_path, "a", encoding="utf-8", buffering=1)
+    logfile.write(f"[SERVER] {time.strftime('%Y-%m-%d %H:%M:%S')} Starting generation for {video_path}\n")
 
     process = subprocess.Popen(
         command,
@@ -150,6 +180,8 @@ def run_framegen(video_path: Path) -> None:
         "success": None,
         "log_path": str(log_path),
         "tail": tail,
+        "last_output_line": None,
+        "last_output_time": None,
     }
 
     def _reader(pipe, name: str):
@@ -162,6 +194,8 @@ def run_framegen(video_path: Path) -> None:
                 except Exception:
                     pass
                 _tail_writer(tail, out)
+                generation_jobs[key]["last_output_line"] = out.strip()
+                generation_jobs[key]["last_output_time"] = time.time()
         finally:
             try:
                 pipe.close()
@@ -170,6 +204,7 @@ def run_framegen(video_path: Path) -> None:
 
     def _monitor():
         generation_jobs[key]["status"] = "running"
+        write_server_log(f"Framegen process started for {video_path} pid={process.pid}")
         stdout_thr = threading.Thread(target=_reader, args=(process.stdout, "OUT"), daemon=True)
         stderr_thr = threading.Thread(target=_reader, args=(process.stderr, "ERR"), daemon=True)
         stdout_thr.start()
@@ -182,7 +217,14 @@ def run_framegen(video_path: Path) -> None:
         generation_jobs[key]["success"] = rc == 0
         generation_jobs[key]["status"] = "done" if rc == 0 else "failed"
         generation_jobs[key]["ended_at"] = time.time()
+        generation_jobs[key]["last_output_line"] = (
+            generation_jobs[key].get("last_output_line") or f"Process exited with {rc}"
+        )
+        generation_jobs[key]["last_output_time"] = time.time()
 
+        write_server_log(
+            f"Framegen process ended for {video_path} pid={process.pid} returncode={rc}"
+        )
         try:
             logfile.write(f"[MONITOR] returncode={rc}\n")
         except Exception:
@@ -259,7 +301,14 @@ def generation_status(name: str):
     key = sanitize_name(str(video_path.relative_to(get_movies_root())))
     job = generation_jobs.get(key)
     if not job:
-        return {"status": "none", "hls_ready": is_hls_ready(video_path)}
+        write_server_log(f"generation_status request for {video_path} with no active job")
+        return {
+            "status": "none",
+            "hls_ready": is_hls_ready(video_path),
+            "complete": False,
+            "last_output_line": None,
+            "last_output_time": None,
+        }
     tail = list(job.get("tail", []))
     state_path = get_hls_dir(video_path) / "resume_state.json"
     complete_state = False
@@ -277,11 +326,33 @@ def generation_status(name: str):
         "ended_at": job.get("ended_at", None),
         "success": job.get("success"),
         "log_path": job.get("log_path"),
+        "last_output_line": job.get("last_output_line"),
+        "last_output_time": job.get("last_output_time"),
         "tail": tail,
         "hls_ready": is_hls_ready(video_path),
         "complete": complete_state,
     }
     return info
+
+
+@app.get("/server-log")
+def server_log(tail: int = 200):
+    if not SERVER_LOG_PATH.exists():
+        return PlainTextResponse("No server log yet.", status_code=404)
+    lines = SERVER_LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+    response = "\n".join(lines[-tail:])
+    return PlainTextResponse(response, media_type="text/plain")
+
+
+@app.get("/generation-log")
+def generation_log(name: str, tail: int = 200):
+    video_path = get_video_path(name)
+    log_path = get_hls_dir(video_path) / "generation.log"
+    if not log_path.exists():
+        return PlainTextResponse("No generation log for this video.", status_code=404)
+    lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    response = "\n".join(lines[-tail:])
+    return PlainTextResponse(response, media_type="text/plain")
 
 
 @app.get("/watch")
@@ -295,10 +366,14 @@ def watch(video: str, mode: str = "normal"):
     hls_url = f"/hls/{quote(str(hls_dir.name))}/stream.m3u8"
 
     if mode == "framegen":
+        write_server_log(f"Watch request for framegen {video_path}")
         if not is_hls_ready(video_path):
             key = sanitize_name(str(video_path.relative_to(get_movies_root())))
             if key not in generation_jobs or generation_jobs[key]["process"].poll() is not None:
+                write_server_log(f"No active generation job found for {video_path}, starting a new one")
                 run_framegen(video_path)
+            else:
+                write_server_log(f"Found active generation job for {video_path} pid={generation_jobs[key]['pid']}")
             status = generation_jobs.get(key, {})
             status_text = (
                 "Generating"

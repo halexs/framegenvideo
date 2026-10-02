@@ -6,6 +6,7 @@ import queue
 import subprocess
 import threading
 import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -23,12 +24,18 @@ from train_log.RIFE_HDv3 import Model
 
 INPUT = "input.mp4"
 HLS_DIR = "hls"
+LOG_PREFIX = "[RIFE]"
 
 os.makedirs(HLS_DIR, exist_ok=True)
 
 app = FastAPI()
 
-print("Loading RIFE...")
+
+def log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{LOG_PREFIX} {timestamp} {message}", flush=True)
+
+log("Loading RIFE...")
 model = Model()
 model.load_model("train_log", -1)
 model.eval()
@@ -40,7 +47,7 @@ torch.backends.cudnn.benchmark = True
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is required for this server")
 
-print("GPU:", torch.cuda.get_device_name(0))
+log("GPU: %s" % torch.cuda.get_device_name(0))
 
 
 def pad_tensor(img):
@@ -157,7 +164,9 @@ def load_resume_state(hls_dir, output_fps):
         inferred_frames = 0
         if existing_segments:
             inferred_frames = len(existing_segments) * max(1, int(round(output_fps * 4)))
-        return {"output_frames_written": inferred_frames, "complete": False}
+        result = {"output_frames_written": inferred_frames, "complete": False}
+        log(f"No resume state found in {hls_dir}. Inferred {inferred_frames} output frames from existing segments.")
+        return result
 
     try:
         with state_path.open("r", encoding="utf-8") as handle:
@@ -165,9 +174,10 @@ def load_resume_state(hls_dir, output_fps):
         if isinstance(data, dict):
             data.setdefault("output_frames_written", 0)
             data.setdefault("complete", False)
+            log(f"Loaded resume state from {state_path}: {data}")
             return data
-    except Exception:
-        pass
+    except Exception as exc:
+        log(f"Failed to load resume state from {state_path}: {exc}")
     return {"output_frames_written": 0, "complete": False}
 
 
@@ -176,17 +186,22 @@ def save_resume_state(hls_dir, state):
     try:
         with state_path.open("w", encoding="utf-8") as handle:
             json.dump(state, handle)
-    except Exception:
-        pass
+        log(f"Saved resume state to {state_path}: {state}")
+    except Exception as exc:
+        log(f"Failed to save resume state to {state_path}: {exc}")
 
 
 def write_frame_to_encoder(encoder, frame, state, hls_dir, skip_count, pinned_buffer=None):
     if skip_count > 0:
+        if skip_count % 50 == 0 or skip_count == 1:
+            log(f"Skipping {skip_count} already-written frame(s)")
         return skip_count - 1
 
     payload = serialize_frame(frame, pinned_buffer=pinned_buffer)
     encoder.stdin.write(payload)
     state["output_frames_written"] += 1
+    if state["output_frames_written"] % 20 == 0:
+        log(f"Wrote output frame #{state['output_frames_written']} to encoder")
     save_resume_state(hls_dir, state)
     return 0
 
@@ -196,20 +211,23 @@ def generate(input_path=None, hls_dir=None):
     hls_dir = hls_dir or HLS_DIR
     os.makedirs(hls_dir, exist_ok=True)
 
+    log(f"Starting generate() with input={input_path}, hls_dir={hls_dir}")
     width, height, fps = probe_video_metadata(input_path)
-    print(f"Input resolution: {width}x{height} @ {fps:.2f} FPS")
+    log(f"Input resolution: {width}x{height} @ {fps:.2f} FPS")
 
     if width >= 2560 or height >= 1440:
         scale_factor = 0.5
-        print("High resolution detected: Using scale_factor = 0.5")
+        log("High resolution detected: Using scale_factor = 0.5")
     else:
         scale_factor = 1.0
-        print("Standard resolution detected: Using scale_factor = 1.0")
+        log("Standard resolution detected: Using scale_factor = 1.0")
 
     output_fps = int(round(fps * 2))
     resume_state = load_resume_state(hls_dir, output_fps)
     skip_count = resume_state["output_frames_written"]
+    log(f"Resume skip_count={skip_count}")
 
+    log(f"Starting ffmpeg encoder with output_fps={output_fps}, hls_dir={hls_dir}")
     encoder = subprocess.Popen(
         [
             "ffmpeg",
@@ -282,12 +300,13 @@ def generate(input_path=None, hls_dir=None):
                     f"Using TorchVision CUDA decode for {video_frames.shape[0]} frames"
                 )
         except Exception as exc:  # pragma: no cover - environment dependent
-            print(f"Falling back to ffmpeg decode path: {exc}")
+            log(f"Falling back to ffmpeg decode path: {exc}")
 
     if use_cuda_decode:
         prev_frame_gpu = None
         prev_frame_uint8 = None
         out_buffer = torch.empty((height, width, 3), dtype=torch.uint8, device="cpu", pin_memory=True)
+        log(f"Using TorchVision CUDA decode for {video_frames.shape[0]} frames")
 
         for idx in range(video_frames.shape[0]):
             curr_frame_uint8 = video_frames[idx]
@@ -327,10 +346,13 @@ def generate(input_path=None, hls_dir=None):
 
         resume_state["complete"] = True
         save_resume_state(hls_dir, resume_state)
+        log(f"Completed CUDA decode generation with complete state={resume_state['complete']}")
         encoder.stdin.close()
         encoder.wait()
+        log("Encoder finished for CUDA decode path")
         return
 
+    log("Using ffmpeg CUDA decode fallback path")
     decoder = subprocess.Popen(
         [
             "ffmpeg",
@@ -355,6 +377,7 @@ def generate(input_path=None, hls_dir=None):
     out_buffer = torch.empty((height, width, 3), dtype=torch.uint8, device="cpu", pin_memory=True)
 
     def read_frames():
+        log("Starting ffmpeg decoder reader thread")
         while True:
             raw = decoder.stdout.read(frame_size)
             if len(raw) != frame_size:
@@ -368,10 +391,15 @@ def generate(input_path=None, hls_dir=None):
 
     previous = None
 
+    frame_counter = 0
     while True:
         frame = raw_queue.get()
         if frame is None:
+            log("Decoder finished reading frames")
             break
+        frame_counter += 1
+        if frame_counter % 50 == 0:
+            log(f"Decoded {frame_counter} frames so far")
 
         if previous is not None:
             middle = interpolate(previous, frame, scale_factor=scale_factor)
@@ -406,6 +434,7 @@ def generate(input_path=None, hls_dir=None):
 
     resume_state["complete"] = True
     save_resume_state(hls_dir, resume_state)
+    log("Completed ffmpeg decode generation and marked resume state complete")
 
     encoder.stdin.close()
     encoder.wait()
