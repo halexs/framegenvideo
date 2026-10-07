@@ -25,9 +25,9 @@ def write_server_log(message: str) -> None:
         pass
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm"}
-MOVIES_ROOT = Path("E:/Movies")
-MOVIES_SHORTCUT = Path(__file__).resolve().parent / "Movies - Shortcut.lnk"
-HLS_ROOT = Path(__file__).resolve().parent / "hls"
+BASE_DIR = Path(__file__).resolve().parent
+MOVIES_ROOT = Path(os.environ.get("MOVIES_DIR", "E:/Movies"))
+HLS_ROOT = Path(os.environ.get("HLS_DIR", str(BASE_DIR / "hls")))
 
 app = FastAPI()
 
@@ -48,38 +48,11 @@ async def log_requests(request: Request, call_next):
         raise
 
 
-def resolve_shortcut_target(shortcut_path: Path) -> Path | None:
-    if not shortcut_path.exists():
-        return None
-    try:
-        shortcut_literal = str(shortcut_path).replace("'", "''")
-        result = subprocess.check_output(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{shortcut_literal}'); Write-Output $s.TargetPath",
-            ],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if result:
-            return Path(result)
-    except Exception:
-        pass
-    return None
-
-
 def get_movies_root() -> Path:
     if MOVIES_ROOT.exists() and MOVIES_ROOT.is_dir():
-        return MOVIES_ROOT
-    target = resolve_shortcut_target(MOVIES_SHORTCUT)
-    if target and target.exists() and target.is_dir():
-        write_server_log(f"Resolved movies root via shortcut: {target}")
-        return target
+        return MOVIES_ROOT.resolve()
     raise FileNotFoundError(
-        "Could not locate the movies directory. "
-        "Create E:/Movies or a Movies - Shortcut.lnk shortcut pointing to it."
+        f"Movies directory not found: {MOVIES_ROOT}. Set the MOVIES_DIR environment variable."
     )
 
 
