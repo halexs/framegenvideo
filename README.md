@@ -1,3 +1,18 @@
+# framegenvideo
+
+Local RIFE-based frame interpolation (e.g. 23.976 -> 60 fps) with a small FastAPI web UI
+(`server.py`) that browses a movie folder and streams HLS while frames are generated.
+Built on [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) (MIT). See `PLAN.md` for the
+audit and the implementation roadmap; `legacy/` holds superseded experiments.
+
+Quick start (Windows): create a venv at `..\.framegen`, `pip install -r requirements.txt`,
+put the RIFE model files in `train_log/`, then run `start_server.bat` (serves http://127.0.0.1:8000).
+The server binds to localhost by default; change `--host` in the start scripts only if you trust your network.
+
+---
+
+# Practical-RIFE (upstream README)
+
 # Practical-RIFE 
 **[V4.0 Anime Demo Video](https://www.bilibili.com/video/BV1J3411t7qT?p=1&share_medium=iphone&share_plat=ios&share_session_id=7AE3DA72-D05C-43A0-9838-E2A80885BD4E&share_source=QQ&share_tag=s_i&timestamp=1639643780&unique_k=rjqO0EK)** | **[迭代经验](https://zhuanlan.zhihu.com/p/721430631)** | **[迭代QA](https://github.com/hzwer/Practical-RIFE/issues/124)** | **[Colab](https://colab.research.google.com/drive/10_n-qGYw5glYQ6k9cejUKr2MKFd5hssC?usp=sharing)**
 
@@ -173,5 +188,6 @@ Notes:
 - If your environment requires additional environment variables or activation steps, update start_server.bat accordingly.
 
 If you want, I can also add a short section showing how to create a desktop shortcut or run the server as a Windows Service.
-#   f r a m e g e n v i d e o  
+#   f r a m e g e n v i d e o 
+ 
  

@@ -8,7 +8,7 @@ if (!(Test-Path $python)) {
 }
 
 # Start uvicorn in a new window so logs are visible
-$arg = "-m uvicorn server:app --host 0.0.0.0 --port 8000 --log-level info"
+$arg = "-m uvicorn server:app --host 127.0.0.1 --port 8000 --log-level info"
 Start-Process -FilePath $python -ArgumentList $arg -WindowStyle Normal
 
 # Open the default browser to the web UI

@@ -10,7 +10,7 @@ if not exist "%VENV_PY%" (
   exit /b 1
 )
 
-n"%VENV_PY%" -m uvicorn server:app --host 0.0.0.0 --port 8000 --log-level info
+"%VENV_PY%" -m uvicorn server:app --host 127.0.0.1 --port 8000 --log-level info
 
-necho Server exited. Press any key to close.
+echo Server exited. Press any key to close.
 pause
