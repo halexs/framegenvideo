@@ -7,6 +7,8 @@ audit and the implementation roadmap; `legacy/` holds superseded experiments.
 
 Quick start (Windows): create a venv at `..\.framegen`, `pip install -r requirements.txt`,
 put the RIFE model files in `train_log/`, then run `start_server.bat` (serves http://127.0.0.1:8000).
+Set `MOVIES_DIR` (default `E:/Movies`), `HLS_DIR`, and for `rife_server.py` `HOST`/`PORT` to override paths.
+Run tests with `pip install pytest fastapi httpx && pytest`.
 The server binds to localhost by default; change `--host` in the start scripts only if you trust your network.
 
 ---
