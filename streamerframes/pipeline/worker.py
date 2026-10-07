@@ -20,7 +20,7 @@ from ..config import Profile, Settings, load_settings
 from ..probe import VideoInfo, probe
 from .audio import ensure_audio
 from .export import export
-from .generator import Generator, RunResult, resolve_scale
+from .generator import Generator, RunResult
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class Job:
     export: bool = False
     export_path: str | None = None
     container: str = "auto"
+    export_codec: str = "copy"       # copy (H.264 segments) | hevc
     device: str = "cuda"
     hwaccel: bool = True
     config: str | None = None
@@ -74,31 +75,48 @@ def _video_crop(store: CacheStore, vid: str, info: VideoInfo, settings: Settings
     return Crop(*box) if box else None
 
 
-def _auto_scale(store: CacheStore, vid: str, settings: Settings, profile: Profile, info: VideoInfo, crop,
-                device: str | None) -> float:
-    """scale=auto is decided once per (video, profile) and remembered, so every process agrees on the cache."""
-    from ..bench import estimate_ms, load_calibration, run_bench, save_entries
-    from .generator import out_fps_for_profile
+def _auto_choice(store: CacheStore, vid: str, settings: Settings, profile: Profile, info: VideoInfo, crop,
+                 device: str | None) -> tuple[str, float]:
+    """Resolve model="auto" and scale="auto" once per (video, profile) and remember the result, so the
+    server and every worker agree on the cache directory even if calibration changes later."""
+    from ..bench import (
+        choose_model_and_scale,
+        estimate_ms,
+        load_calibration,
+        run_bench,
+        save_entries,
+    )
+    from .generator import interps_per_second, out_fps_for_profile
 
-    if profile.scale != "auto":
-        return float(profile.scale)
+    if profile.model != "auto" and profile.scale != "auto":
+        return profile.model, float(profile.scale)
     source = store.source(vid) or {}
-    sticky = source.get("auto_scale", {}).get(profile.name)
-    if sticky is not None:
-        return float(sticky)
+    sticky = source.get("auto_choice", {}).get(profile.name)
+    if sticky:
+        return sticky["model"], float(sticky["scale"])
+    models = settings.available_models() if profile.model == "auto" else [profile.model]
+    if not models:
+        raise RuntimeError(f"no usable model in {settings.model_dir} or {settings.models_dir}")
+    scales = (1.0, 0.5) if profile.scale == "auto" else (float(profile.scale),)
     h, w = (crop.h, crop.w) if crop else (info.height, info.width)
     calibration = load_calibration(settings.cache_root)
-    if device and str(device).startswith("cuda") and \
-            estimate_ms(calibration, profile.model, w, h, 1.0, profile.cuda_graphs) is None:
-        log.info("no calibration for %dx%d; benchmarking (a few seconds)", w, h)
-        save_entries(settings.cache_root, run_bench(settings.model_path(profile.model), profile.model, w, h,
-                                                    device, graphs_options=(profile.cuda_graphs,),
-                                                    warmup=3, iters=10))
+    if device and str(device).startswith("cuda"):
+        for model in models:
+            if estimate_ms(calibration, model, w, h, scales[0], profile.cuda_graphs) is None:
+                log.info("no calibration for %s at %dx%d; benchmarking (a few seconds)", model, w, h)
+                save_entries(settings.cache_root, run_bench(settings.model_path(model), model, w, h, device,
+                                                            scales, graphs_options=(profile.cuda_graphs,),
+                                                            warmup=3, iters=10))
         calibration = load_calibration(settings.cache_root)
-    scale = resolve_scale(profile, w, h, calibration, out_fps_for_profile(info.src_fps, profile), info.src_fps)
-    source.setdefault("auto_scale", {})[profile.name] = scale
+    choice = choose_model_and_scale(calibration, models, w, h,
+                                    interps_per_second(info.src_fps, out_fps_for_profile(info.src_fps, profile)),
+                                    profile.cuda_graphs, scales)
+    if choice is None:  # no calibration (e.g. resolved by the web server): best model, size heuristic
+        choice = (models[0], scales[0] if len(scales) == 1 else (1.0 if w * h <= 1280 * 720 else 0.5))
+    model, scale = choice
+    source.setdefault("auto_choice", {})[profile.name] = {"model": model, "scale": scale}
     store.write_source(vid, source)
-    return scale
+    return model, float(scale)
 
 
 def resolve(settings: Settings, job: Job, info: VideoInfo | None = None, device: str | None = None):
@@ -114,7 +132,8 @@ def resolve(settings: Settings, job: Job, info: VideoInfo | None = None, device:
     store.write_source(vid, source)
     profile = build_profile(settings, job)
     crop = _video_crop(store, vid, info, settings) if profile.letterbox_crop else None
-    scale = _auto_scale(store, vid, settings, profile, info, crop, device)
+    profile.model, scale = _auto_choice(store, vid, settings, profile, info, crop, device)
+    profile.scale = scale
     cache = store.profile(vid, profile.profile_id(scale))
     return info, vid, profile, scale, cache, crop
 
@@ -163,7 +182,8 @@ def run_job(job: Job, settings: Settings | None = None, stop_event: threading.Ev
             audio_thread.join()
     if result.status == "complete" and job.export:
         export(cache, info, Path(job.export_path) if job.export_path else None, job.container,
-               Path(settings.export_dir) if settings.export_dir else None)
+               Path(settings.export_dir) if settings.export_dir else None, job.export_codec,
+               settings.hevc_encoder)
     return result
 
 

@@ -29,7 +29,7 @@ class Profile:
     multi: int = 2
     target_fps: int = 60
     scale: float | str = "auto"        # 1.0 | 0.5 | auto
-    model: str = "default"             # a directory name under models_dir, or "default" for model_dir
+    model: str = "default"             # "default" (model_dir), a directory under models_dir, or "auto"
     seg_seconds: float = 4.0
     scene_detect: bool = True
     scene_ssim: float = 0.2            # SSIM below this between neighbours = hard cut
@@ -80,6 +80,9 @@ class Settings:
     min_free_vram_mb: int = 1500
     stream_policy: str = "newest_wins"  # newest_wins | queue
     watch_dirs: list[str] = field(default_factory=list)
+    watch_profile: str = "quality"
+    model_preference: list[str] = field(default_factory=list)  # best quality first, for model = "auto"
+    hevc_encoder: str = "hevc_nvenc"   # for HEVC exports; libx265 works without NVENC
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     profiles: dict[str, Profile] = field(default_factory=lambda: copy.deepcopy(DEFAULT_PROFILES))
@@ -97,7 +100,24 @@ class Settings:
     def model_path(self, name: str) -> Path:
         if name in ("", "default"):
             return Path(self.model_dir)
+        if name == "auto":
+            raise ValueError("model 'auto' must be resolved first")
         return Path(self.models_dir) / name
+
+    def available_models(self) -> list[str]:
+        """Usable models, best quality first: model_preference, else default, full models, then lite ones."""
+        def usable(p: Path) -> bool:
+            return (p / "IFNet_HDv3.py").exists() and (p / "flownet.pkl").exists()
+
+        found = ["default"] if usable(Path(self.model_dir)) else []
+        root = Path(self.models_dir)
+        if root.is_dir():
+            names = sorted(p.name for p in root.iterdir() if p.is_dir() and usable(p))
+            found += sorted(names, key=lambda n: ("lite" in n.lower(), n))
+        if self.model_preference:
+            ranked = [m for m in self.model_preference if m in found]
+            found = ranked + [m for m in found if m not in ranked]
+        return found
 
 
 def _profile_from_dict(name: str, raw: dict, base: Profile | None) -> Profile:

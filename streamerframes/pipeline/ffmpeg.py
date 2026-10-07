@@ -120,7 +120,25 @@ def export_container(info: VideoInfo, requested: str = "auto") -> str:
     return "mkv" if info.has_bitmap_subtitles else "mp4"
 
 
-def finalize_cmd(info: VideoInfo, concat_list: Path, output: Path) -> list[str]:
+def video_export_args(codec: str = "copy", cq: int = 22, hevc_encoder: str = "hevc_nvenc") -> list[str]:
+    """``copy`` keeps the H.264 segments; ``hevc`` re-encodes for smaller offline files.
+
+    Pascal NVENC has no HEVC B-frames, so -bf 0. hvc1 tagging lets Apple players open the MP4.
+    """
+    if codec == "copy":
+        return ["-c:v", "copy"]
+    if codec != "hevc":
+        raise ValueError(f"unknown export codec {codec!r}")
+    if hevc_encoder == "hevc_nvenc":
+        args = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", str(cq), "-b:v", "0",
+                "-bf", "0", "-spatial-aq", "1"]
+    else:  # e.g. libx265 on machines without NVENC
+        args = ["-c:v", hevc_encoder, "-crf", str(cq)]
+    return args + ["-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+
+
+def finalize_cmd(info: VideoInfo, concat_list: Path, output: Path, video_codec: str = "copy",
+                 hevc_encoder: str = "hevc_nvenc") -> list[str]:
     """Concatenate video segments and copy the source's audio and subtitles untouched."""
     output = Path(output)
     mp4 = output.suffix.lower() in (".mp4", ".m4v", ".mov")
@@ -130,7 +148,7 @@ def finalize_cmd(info: VideoInfo, concat_list: Path, output: Path) -> list[str]:
     ]
     if not (mp4 and info.has_bitmap_subtitles):
         cmd += ["-map", "1:s?"]
-    cmd += ["-c", "copy"]
+    cmd += ["-c", "copy"] + video_export_args(video_codec, hevc_encoder=hevc_encoder)
     if mp4:
         cmd += ["-c:s", "mov_text", "-movflags", "+faststart"]
     cmd += ["-y", str(output)]

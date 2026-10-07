@@ -13,7 +13,14 @@ cache_max_gb = 200                    # LRU eviction of non-exported, idle cache
 auto_resume = true                    # re-queue interrupted offline jobs on server start
 fill_gaps = true                      # after streaming, fill holes left by seeks in the background
 stream_policy = "newest_wins"         # or "queue"
-watch_dirs = []                       # new videos here get an offline "quality" job
+watch_dirs = []                       # new videos here get an offline job (watch_profile)
+watch_profile = "quality"
+model_preference = []                 # for model = "auto": best quality first, e.g. ["default", "4.25.lite"]
+hevc_encoder = "hevc_nvenc"           # used by HEVC exports ("libx265" without NVENC)
+
+# Profile keys: mode (multi|target), multi, target_fps, scale (1.0|0.5|auto), model (default|<dir in
+# models_dir>|auto), seg_seconds, scene_detect, scene_ssim (cut if SSIM below; 0.2), dup_mad (skip
+# inference when frames differ less than this; 0 = off, ~0.002 suits anime), letterbox_crop, cuda_graphs.
 
 [profiles.realtime]
 mode = "multi"

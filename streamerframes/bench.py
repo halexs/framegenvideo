@@ -50,13 +50,31 @@ def estimate_ms(entries: dict, model: str, width: int, height: int, scale: float
 def choose_scale(entries: dict, model: str, width: int, height: int, interps_per_sec: float, graphs: bool,
                  gpu: str | None = None, margin: float = 1.1) -> float | None:
     """Highest-quality scale fast enough for real time with ``margin``, else the fastest measured one."""
-    measured = {s: estimate_ms(entries, model, width, height, s, graphs, gpu) for s in SCALES}
-    measured = {s: ms for s, ms in measured.items() if ms}
+    choice = choose_model_and_scale(entries, [model], width, height, interps_per_sec, graphs, gpu=gpu,
+                                    margin=margin)
+    return choice[1] if choice else None
+
+
+def choose_model_and_scale(entries: dict, models: list[str], width: int, height: int, interps_per_sec: float,
+                           graphs: bool, scales=SCALES, gpu: str | None = None,
+                           margin: float = 1.1) -> tuple[str, float] | None:
+    """Best (model, scale) fast enough for real time: models in quality order, full scale before half.
+
+    If nothing is fast enough, the fastest measured combination.
+    """
+    measured = {}
+    for model in models:
+        for s in scales:
+            ms = estimate_ms(entries, model, width, height, s, graphs, gpu)
+            if ms:
+                measured[(model, s)] = ms
     if not measured:
         return None
-    for s in sorted(measured, reverse=True):
-        if 1000.0 / measured[s] >= margin * interps_per_sec:
-            return s
+    for model in models:
+        for s in sorted(scales, reverse=True):
+            ms = measured.get((model, s))
+            if ms and 1000.0 / ms >= margin * interps_per_sec:
+                return model, s
     return min(measured, key=measured.get)
 
 
