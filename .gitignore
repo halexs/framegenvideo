@@ -20,6 +20,6 @@ __pycache__
 .framegen/
 legacy/__pycache__/
 streamerframes.toml
-cache/
+/cache/
 models/
 *.engine
