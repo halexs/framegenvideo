@@ -8,6 +8,8 @@ audit and the implementation roadmap; `legacy/` holds superseded experiments.
 Quick start (Windows): create a venv at `..\.framegen`, `pip install -r requirements.txt`,
 put the RIFE model files in `train_log/`, then run `start_server.bat` (serves http://127.0.0.1:8000).
 Set `MOVIES_DIR` (default `E:/Movies`), `HLS_DIR`, and for `rife_server.py` `HOST`/`PORT` to override paths.
+The new `streamerframes/` package (in progress, see `PLAN.md`) has a CLI: `python -m streamerframes probe <video>` and
+`python -m streamerframes plan <video> --target-fps 60` (output fps, frame count, segment layout).
 Run tests with `pip install pytest fastapi httpx && pytest`.
 The server binds to localhost by default; change `--host` in the start scripts only if you trust your network.
 
