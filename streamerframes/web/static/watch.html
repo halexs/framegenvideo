@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watch · StreamerFrames</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<header>
+  <h1><a href="/">StreamerFrames</a></h1>
+  <span id="title"></span>
+  <span style="flex:1"></span>
+  <a class="btn" id="to-original">Original</a>
+  <a class="btn" id="to-framegen">Framegen</a>
+  <a class="btn" id="to-compare">Compare</a>
+</header>
+<main>
+  <video id="video" controls playsinline></video>
+  <div class="status" id="status" hidden>
+    <div class="line" id="s-main"></div>
+    <div class="line muted" id="s-detail"></div>
+    <div class="line" id="s-advice"></div>
+    <button class="primary" id="play-now" hidden>Play now</button>
+    <button id="cancel" hidden>Stop generating</button>
+  </div>
+</main>
+<script src="/static/hls.min.js"></script>
+<script src="/static/app.js"></script>
+<script>SF.watchPage();</script>
+</body>
+</html>

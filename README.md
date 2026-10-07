@@ -1,22 +1,15 @@
 # framegenvideo
 
-Local RIFE-based frame interpolation (e.g. 23.976 -> 60 fps) with a small FastAPI web UI
-(`server.py`) that browses a movie folder and streams HLS while frames are generated.
-Built on [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) (MIT). See `PLAN.md` for the
-audit and the implementation roadmap; `legacy/` holds superseded experiments.
+**StreamerFrames**: raise low-frame-rate movies (23.976 → 47.95 or 59.94 fps) with RIFE on a local NVIDIA GPU,
+streamed to the browser while it generates, or rendered offline to MP4/MKV. Built on
+[Practical-RIFE](https://github.com/hzwer/Practical-RIFE) (MIT; its README follows below).
 
-Quick start (Windows): create a venv at `..\.framegen`, `pip install -r requirements.txt`,
-put the RIFE model files in `train_log/`, then run `start_server.bat` (serves http://127.0.0.1:8000).
-Set `MOVIES_DIR` (default `E:/Movies`), `HLS_DIR`, and for `rife_server.py` `HOST`/`PORT` to override paths.
-The new `streamerframes/` package (see `README-StreamerFrames.md` and `PLAN.md`) has a CLI: `python -m streamerframes probe <video>` and
-`python -m streamerframes plan <video> --target-fps 60` (output fps, frame count, segment layout), and
-`python -m streamerframes check` (GPU, torch arch, ffmpeg/NVENC, model files),
-`python -m streamerframes render <video> [--profile quality|realtime] [--target-fps 60 | --multi 2]` (resumable;
-Ctrl+C pauses, rerun to continue; exports MP4/MKV with the source audio and subtitles), and
-`python -m streamerframes cache {ls,rm,gc}`.
-Configuration: copy `streamerframes.example.toml` to `streamerframes.toml`.
-Run tests with `pip install pytest fastapi httpx && pytest`.
-The server binds to localhost by default; change `--host` in the start scripts only if you trust your network.
+- Setup, usage, configuration and design: [README-StreamerFrames.md](README-StreamerFrames.md)
+- The audit and implementation plan: [PLAN.md](PLAN.md)
+- Quick start (Windows): venv at `..\.framegen`, cu126 torch, `pip install -r requirements-streamerframes.txt`,
+  model files in `train_log/`, then `start_server.bat` → http://localhost:8000
+- Offline: `python -m streamerframes render <video> --target-fps 60`
+- Tests: `pip install pytest fastapi uvicorn httpx && pytest` (CPU only; no GPU needed)
 
 ---
 
@@ -154,49 +147,5 @@ Video Interpolation:
 
 ## Running the StreamerFrames server (Windows)
 
-This repository includes a small FastAPI-based web server (server.py) and a RIFE HLS generator (rife_server.py). The server lists movies in E:\\Movies (or resolves the "Movies - Shortcut.lnk" file in the project root) and can play the original file or stream a RIFE-interpolated HLS version.
-
-Quick start (uses the provided virtualenv at `.framegen`):
-
-1. Open Command Prompt or PowerShell in the project folder.
-
-2. Start the server with the bundled batch script (uses `.framegen` Python):
-
-   - Double-click start_server.bat or run:
-
-     start_server.bat
-
-   - Or launch the PowerShell helper which opens a server window and your browser:
-
-     start_server.ps1
-
-3. The UI will be available at http://localhost:8000. Choose a movie and click "Normal" to play the original or "Framegen" to prepare and play the interpolated HLS stream.
-
-Manual start using the project virtualenv Python:
-
-- Run uvicorn directly from the venv:
-
-  .\\.framegen\\Scripts\\python.exe -m uvicorn server:app --host 0.0.0.0 --port 8000
-
-Generate a framegen HLS stream manually:
-
-- Generate-only mode for testing (creates HLS in an output folder):
-
-  .\\.framegen\\Scripts\\python.exe rife_server.py --input "E:\\Movies\\MyMovie.mp4" --hls-dir "hls/MyMovie" --generate-only
-
-- The web UI will start generation automatically when you use the "Framegen" link for a movie.
-
-Auto-start on logon (optional):
-
-- Run create_schtask.bat as Administrator to register a scheduled task named "StreamerFramesServer" that runs start_server.bat at logon.
-
-Notes:
-
-- The scripts assume the virtualenv exists at `.framegen`. If you use a different venv, update start_server.bat / start_server.ps1 to point to the correct python.exe.
-- The RIFE generator requires a CUDA-enabled PyTorch (torch + torchvision built with CUDA). Ensure `.framegen` contains those packages.
-- If your environment requires additional environment variables or activation steps, update start_server.bat accordingly.
-
-If you want, I can also add a short section showing how to create a desktop shortcut or run the server as a Windows Service.
-#   f r a m e g e n v i d e o 
- 
- 
+See [README-StreamerFrames.md](README-StreamerFrames.md): setup, `start_server.bat` / `python -m streamerframes serve`,
+offline rendering, configuration, and how it works.

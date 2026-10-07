@@ -9,6 +9,7 @@ from ..probe import VideoInfo
 from ..timeline import Timeline
 
 BASE = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "warning"]
+AAC_PRIMING_SAMPLES = 1024
 
 
 def frame_bytes(width: int, height: int) -> int:
@@ -103,6 +104,9 @@ def audio_cmd(info: VideoInfo, audio_dir: Path, stream: int | None = None,
     audio_dir = Path(audio_dir)
     return list(BASE) + [
         "-i", info.path, "-map", f"0:a:{stream}", "-vn",
+        # The AAC encoder prepends 1024 priming samples, and MPEG-TS has no edit list to hide them, so a
+        # player would hear everything ~21 ms late. Drop 1024 source samples to cancel them out.
+        "-af", f"atrim=start_sample={AAC_PRIMING_SAMPLES},asetpts=PTS-STARTPTS",
         "-c:a", "aac", "-b:a", "192k", "-ac", "2",
         "-f", "segment", "-segment_format", "mpegts", "-segment_time", str(segment_seconds),
         "-segment_list", str(audio_dir / "audio.csv"), "-segment_list_type", "csv",

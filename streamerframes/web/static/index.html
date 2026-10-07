@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamerFrames</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<header>
+  <h1><a href="/">StreamerFrames</a></h1>
+  <input type="search" id="filter" placeholder="Filter movies…">
+  <span id="gpu" class="muted"></span>
+  <button id="refresh" title="Rescan the movie folders">Rescan</button>
+</header>
+<main>
+  <table>
+    <thead><tr><th>Movie</th><th class="hide-narrow">Source</th><th>Framegen</th><th>Actions</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+  </table>
+</main>
+<script src="/static/app.js"></script>
+<script>SF.libraryPage();</script>
+</body>
+</html>
