@@ -216,3 +216,32 @@ def test_stream_job_builds_audio_rendition_once(env):
     job = job_for(silent, kind="stream")
     assert run_job(job, settings).status == "complete"
     assert (CacheStore(settings.cache_root).audio_dir(resolve(settings, job)[1]) / "DONE").read_text() == "none"
+
+
+def test_stop_now_never_indexes_the_partial_segment(env):
+    root, settings = env
+    src = make_clip(root / "h.mp4", frames=72, audio=False)
+    reference = job_for(src, overrides={"scale": 1.0, "seg_seconds": 1.0})
+    assert run_job(reference, settings).status == "complete"
+    ref_cache = resolve(settings, reference)[4]
+    ref = segment_frames(ref_cache, ref_cache.manifest()["total_segments"])
+
+    job = job_for(src)
+    cache = resolve(settings, job)[4]
+    from streamerframes.pipeline import generator as gen_mod
+    orig = gen_mod.Generator.__init__
+
+    def fast_progress(self, *a, **kw):
+        kw["progress_interval"] = 0
+        orig(self, *a, **kw)
+
+    gen_mod.Generator.__init__ = fast_progress
+    try:
+        # Abandon mid-segment (N=24): frame 40 is inside segment 1.
+        result = run_job(job, settings, on_progress=lambda p: p["out_frame"] >= 40 and cache.request_stop(now=True))
+    finally:
+        gen_mod.Generator.__init__ = orig
+    assert result.status == "paused"
+    assert cache.completed_segments() == {0}  # segment 1 was cut off and must not count
+    assert run_job(job, settings).status == "complete"
+    assert segment_frames(cache, cache.manifest()["total_segments"]) == ref

@@ -124,6 +124,8 @@ def run_job(job: Job, settings: Settings | None = None, stop_event: threading.Ev
     settings = settings or load_settings(job.config)
     stop_event = stop_event or threading.Event()
     info, vid, profile, scale, cache, crop = resolve(settings, job, device=job.device)
+    if job.job_id is None:
+        cache.clear_stop()  # a stale stop from a killed CLI run; the job manager clears its own before launch
     log.info("job %s: %s profile=%s scale=%s cache=%s", job.job_id or "-", job.video_path, profile.name,
              scale, cache.root)
     audio_thread = None
@@ -151,6 +153,8 @@ def run_job(job: Job, settings: Settings | None = None, stop_event: threading.Ev
             result = gen.run(start)
             if result.status != "partial" or stop_event.is_set() or cache.stop_requested():
                 break
+            if job.kind == "stream":
+                break  # the viewer's stretch is done; the manager queues an offline gap-filler (fill_gaps)
             start = 0  # a hole was filled; fill the next one (first_missing wraps around)
     finally:
         if audio_thread is not None:

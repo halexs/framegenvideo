@@ -5,6 +5,9 @@
 from pathlib import Path
 
 IFNET_SOURCE = '''
+import os
+import time
+
 import torch
 import torch.nn as nn
 from model.warplayer import warp  # same import as upstream; proves the repo root is on sys.path
@@ -19,6 +22,9 @@ class IFNet(nn.Module):
 
     def forward(self, x, timestep=0.5, scale_list=None):
         self.calls += 1
+        delay = float(os.environ.get("FAKE_IFNET_DELAY", "0"))  # lets tests make generation slow
+        if delay:
+            time.sleep(delay)
         img0, img1 = x[:, :3], x[:, 3:6]
         if not torch.is_tensor(timestep):
             timestep = (x[:, :1].clone() * 0 + 1) * timestep

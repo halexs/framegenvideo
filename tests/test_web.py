@@ -114,3 +114,36 @@ def test_cancel_and_delete_conflict(web):
     client.delete(f"/api/jobs/{job['id']}")
     done = wait_job(client, job["id"], states=("cancelled", "complete"))
     assert done["state"] in ("cancelled", "complete")
+
+
+def test_seek_retargets_generation_and_gaps_get_filled(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_IFNET_DELAY", "0.03")  # ~35 interpolations/s: slow enough to seek ahead of
+    movies, settings, manager, app = make_env(tmp_path)
+    make_movie(movies / "seek.mp4", frames=360, audio=False)  # 30 segments of 0.5 s at 2x
+    with TestClient(app) as client:
+        vid = client.get("/api/library").json()["videos"][0]["video_id"]
+        job = client.post("/api/jobs", json={"video_id": vid, "kind": "stream", "profile": "realtime"}).json()
+        pid = job["profile_id"]
+        video = client.get(f"/hls/{vid}/{pid}/video.m3u8").text
+        assert video.count("#EXTINF") == 30 and "#EXT-X-ENDLIST" in video  # whole timeline up front
+        assert client.get(f"/hls/{vid}/{pid}/seg/30.ts").status_code == 404
+
+        t0 = time.time()
+        far = client.get(f"/hls/{vid}/{pid}/seg/25.ts")  # seek near the end: long-poll + retarget
+        assert far.status_code == 200 and far.content[:1] == b"G"
+        rec = manager.get(job["id"])
+        assert rec.start_segment == 25 and rec.runs == 2
+        status = client.get(f"/api/status/{vid}/{pid}").json()
+        assert [25, 26] in [[a, min(b, 26)] for a, b in status["ranges"]]
+        assert time.time() - t0 < 20
+
+        # After the stream stretch reaches the end, an offline job fills the holes and completes the cache.
+        end = time.time() + 90
+        while time.time() < end:
+            st = client.get(f"/api/status/{vid}/{pid}").json()
+            if st["status"] == "complete":
+                break
+            time.sleep(0.3)
+        assert st["status"] == "complete" and st["ranges"] == [[0, 30]]
+        kinds = sorted(j.kind for j in manager.jobs.values())
+        assert kinds == ["offline", "stream"]

@@ -24,6 +24,10 @@ either offline (render a file) or streamed to a browser while it generates. Buil
 - **Framegen** starts a `stream` job and plays the HLS output while it is generated. The status line shows
   how much is ready, speed (× real time), and whether playing now will run without stalling
   (lead `B ≥ remaining × (1 − speed)`); otherwise how long to wait. Playback starts by itself once it's safe.
+- **Seeking works anywhere**, even far ahead of what's generated: the playlist lists the whole movie up
+  front, and asking for a segment that doesn't exist yet either waits for it (if it's within ~3 segments of
+  the current run) or restarts generation right there (debounced, so scrubbing doesn't thrash). Holes left
+  behind are filled afterwards by a background job (`fill_gaps`), so the cache still ends up complete.
 - **Compare** shows the original and the framegen version side by side, synced.
 - **One GPU worker at a time.** Streaming outranks offline jobs (offline work pauses after its current
   segment and resumes afterwards); by default a new stream replaces an older one (`stream_policy`). Jobs
