@@ -1,0 +1,10 @@
+# StreamerFrames dependencies (upstream RIFE requirements stay in requirements.txt).
+# Torch for the GTX 1080 Ti (Pascal, sm_61): use the CUDA 12.6 wheels. cu128 and newer drop Pascal.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+# ffmpeg/ffprobe must be on PATH (h264_nvenc needed for GPU encoding).
+fastapi
+uvicorn
+numpy
+psutil
+pytest
+httpx
