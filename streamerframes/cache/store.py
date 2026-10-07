@@ -204,12 +204,21 @@ class ProfileCache:
         current = read_json(self.lock_path)
         return current if lock_is_live(current) else None
 
-    def request_stop(self) -> None:
+    def request_stop(self, now: bool = False) -> None:
+        """Graceful (finish the current segment) or ``now`` (abandon it; used when retargeting a seek)."""
         self.root.mkdir(parents=True, exist_ok=True)
-        self.stop_path.touch()
+        tmp = self.stop_path.with_name("stop.tmp")
+        tmp.write_text("now" if now else "segment")
+        os.replace(tmp, self.stop_path)
 
     def stop_requested(self) -> bool:
         return self.stop_path.exists()
+
+    def stop_now_requested(self) -> bool:
+        try:
+            return self.stop_path.read_text().strip() == "now"
+        except OSError:
+            return False
 
     def clear_stop(self) -> None:
         self.stop_path.unlink(missing_ok=True)
