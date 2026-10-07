@@ -60,30 +60,77 @@ def build_profile(settings: Settings, job: Job) -> Profile:
     return profile
 
 
-def resolve(settings: Settings, job: Job, info: VideoInfo | None = None):
-    """-> (info, video_id, profile, scale, ProfileCache) without starting anything."""
+def _video_crop(store: CacheStore, vid: str, info: VideoInfo, settings: Settings):
+    """Letterbox crop, detected once per video and remembered in source.json."""
+    from ..engine.color import Crop
+    from .letterbox import detect_letterbox
+
+    source = store.source(vid) or {}
+    if "letterbox" not in source:
+        crop = detect_letterbox(info, ffmpeg=settings.ffmpeg)
+        source["letterbox"] = [crop.x, crop.y, crop.w, crop.h] if crop else None
+        store.write_source(vid, source)
+    box = source["letterbox"]
+    return Crop(*box) if box else None
+
+
+def _auto_scale(store: CacheStore, vid: str, settings: Settings, profile: Profile, info: VideoInfo, crop,
+                device: str | None) -> float:
+    """scale=auto is decided once per (video, profile) and remembered, so every process agrees on the cache."""
+    from ..bench import estimate_ms, load_calibration, run_bench, save_entries
+    from .generator import out_fps_for_profile
+
+    if profile.scale != "auto":
+        return float(profile.scale)
+    source = store.source(vid) or {}
+    sticky = source.get("auto_scale", {}).get(profile.name)
+    if sticky is not None:
+        return float(sticky)
+    h, w = (crop.h, crop.w) if crop else (info.height, info.width)
+    calibration = load_calibration(settings.cache_root)
+    if device and str(device).startswith("cuda") and \
+            estimate_ms(calibration, profile.model, w, h, 1.0, profile.cuda_graphs) is None:
+        log.info("no calibration for %dx%d; benchmarking (a few seconds)", w, h)
+        save_entries(settings.cache_root, run_bench(settings.model_path(profile.model), profile.model, w, h,
+                                                    device, graphs_options=(profile.cuda_graphs,),
+                                                    warmup=3, iters=10))
+        calibration = load_calibration(settings.cache_root)
+    scale = resolve_scale(profile, w, h, calibration, out_fps_for_profile(info.src_fps, profile), info.src_fps)
+    source.setdefault("auto_scale", {})[profile.name] = scale
+    store.write_source(vid, source)
+    return scale
+
+
+def resolve(settings: Settings, job: Job, info: VideoInfo | None = None, device: str | None = None):
+    """-> (info, video_id, profile, scale, ProfileCache, crop) without starting generation.
+
+    ``device`` allows a calibration benchmark for scale=auto (workers pass it; the web server doesn't).
+    """
     info = info or probe(job.video_path, settings.ffprobe)
     vid = video_id_for(job.video_path)
     store = CacheStore(settings.cache_root)
-    store.write_source(vid, info.to_json())
+    source = store.source(vid) or {}
+    source.update(info.to_json())
+    store.write_source(vid, source)
     profile = build_profile(settings, job)
-    scale = resolve_scale(profile, info.width, info.height, settings=settings, model=profile.model)
+    crop = _video_crop(store, vid, info, settings) if profile.letterbox_crop else None
+    scale = _auto_scale(store, vid, settings, profile, info, crop, device)
     cache = store.profile(vid, profile.profile_id(scale))
-    return info, vid, profile, scale, cache
+    return info, vid, profile, scale, cache, crop
 
 
 def run_job(job: Job, settings: Settings | None = None, stop_event: threading.Event | None = None,
             on_progress: Callable[[dict], None] | None = None, engine_factory=None) -> RunResult:
     settings = settings or load_settings(job.config)
     stop_event = stop_event or threading.Event()
-    info, vid, profile, scale, cache = resolve(settings, job)
+    info, vid, profile, scale, cache, crop = resolve(settings, job, device=job.device)
     log.info("job %s: %s profile=%s scale=%s cache=%s", job.job_id or "-", job.video_path, profile.name,
              scale, cache.root)
     if job.kind == "stream":
         ensure_audio(info, CacheStore(settings.cache_root).audio_dir(vid))
     gen = Generator(info, profile, cache, scale=scale, model_dir=settings.model_path(profile.model),
                     device=job.device, hwaccel=job.hwaccel, engine_factory=engine_factory,
-                    stop_event=stop_event, on_progress=on_progress)
+                    stop_event=stop_event, on_progress=on_progress, crop=crop)
     start = job.start_segment
     while True:
         result = gen.run(start)

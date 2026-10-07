@@ -75,7 +75,7 @@ def test_2x_render_is_exact(env):
     job = job_for(src, export=True)
     result = run_job(job, settings)
     assert result.status == "complete"
-    info, vid, profile, scale, cache = resolve(settings, job)
+    info, vid, profile, scale, cache, crop = resolve(settings, job)
     m = cache.manifest()
     assert m["status"] == "complete" and m["out_fps"] == "48000/1001"
     assert m["n_src_actual"] == 60 and m["total_out_frames"] == 120

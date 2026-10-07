@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -46,10 +47,22 @@ def out_fps_for_profile(src_fps: Fraction, profile: Profile) -> Fraction:
     return out_fps_for_multiplier(src_fps, Fraction(profile.multi))
 
 
-def resolve_scale(profile: Profile, width: int, height: int, settings=None, model: str = "default") -> float:
-    """Phase 1 heuristic for scale=auto: full scale up to 720p, half above. Phase 2 uses calibration."""
+def interps_per_second(src_fps: Fraction, out_fps: Fraction) -> float:
+    """Interpolated (non-source) output frames needed per second of video."""
+    return float(out_fps - src_fps)
+
+
+def resolve_scale(profile: Profile, width: int, height: int, calibration: dict | None = None,
+                  out_fps: Fraction | None = None, src_fps: Fraction | None = None) -> float:
+    """scale=auto: pick from benchmark calibration when available, else full scale up to 720p."""
     if profile.scale != "auto":
         return float(profile.scale)
+    if calibration and out_fps and src_fps:
+        from ..bench import choose_scale
+        chosen = choose_scale(calibration, profile.model, width, height,
+                              interps_per_second(src_fps, out_fps), profile.cuda_graphs)
+        if chosen:
+            return chosen
     return 1.0 if width * height <= 1280 * 720 else 0.5
 
 
@@ -62,33 +75,45 @@ def frame_tolerance(n: int) -> int:
     return max(3, n // 500)
 
 
-def default_engine_factory(info: VideoInfo, profile: Profile, model_dir: Path, scale: float, device: str):
+def default_engine_factory(info: VideoInfo, profile: Profile, model_dir: Path, scale: float, device: str,
+                           crop=None):
     def build():
-        from ..engine.color import ColorSpec, YuvConverter
+        from ..engine.color import ColorSpec, CroppedConverter, YuvConverter
         from ..engine.loader import load_ifnet
         from ..engine.rife import RifeEngine
 
+        conv = CroppedConverter(
+            YuvConverter(info.width, info.height,
+                         ColorSpec.from_names(info.color_space, info.color_range, info.height), device), crop)
+        h, w = conv.size
         net = load_ifnet(model_dir, device)
-        engine = RifeEngine(net, info.height, info.width, scale, device,
-                            scene_ssim=profile.scene_ssim, dup_mad=profile.dup_mad)
-        conv = YuvConverter(info.width, info.height,
-                            ColorSpec.from_names(info.color_space, info.color_range, info.height), device)
+        engine = RifeEngine(net, h, w, scale, device, scene_ssim=profile.scene_ssim, dup_mad=profile.dup_mad)
+        if profile.cuda_graphs:
+            engine.enable_cuda_graph()
         return engine, conv
     return build
+
+
+class _Abort(Exception):
+    pass
 
 
 class Generator:
     def __init__(self, info: VideoInfo, profile: Profile, cache: ProfileCache, *, scale: float,
                  model_dir: Path | None = None, device: str = "cuda", hwaccel: bool = True,
                  engine_factory: Callable | None = None, stop_event: threading.Event | None = None,
-                 progress_interval: float = 2.0, on_progress: Callable[[dict], None] | None = None):
+                 progress_interval: float = 2.0, on_progress: Callable[[dict], None] | None = None,
+                 crop=None, in_ring: int = 6, out_ring: int = 8):
         self.info = info
         self.profile = profile
         self.cache = cache
         self.scale = scale
         self.device = device
         self.hwaccel = hwaccel
-        self.engine_factory = engine_factory or default_engine_factory(info, profile, model_dir, scale, device)
+        self.crop = crop
+        self.in_ring, self.out_ring = in_ring, out_ring
+        self.engine_factory = engine_factory or default_engine_factory(info, profile, model_dir, scale, device,
+                                                                       crop)
         self.stop_event = stop_event or threading.Event()
         self.progress_interval = progress_interval
         self.on_progress = on_progress
@@ -116,6 +141,7 @@ class Generator:
             "profile_name": self.profile.name,
             "profile": self.profile.pixel_settings(),
             "scale": self.scale,
+            "crop": [self.crop.x, self.crop.y, self.crop.w, self.crop.h] if self.crop else None,
             "source": self.info.path,
             "width": self.info.width,
             "height": self.info.height,
@@ -207,10 +233,18 @@ class Generator:
             self.cache.release_lock()
 
     def _run(self, tl: Timeline, k0: int, end: int, run_id: int) -> RunResult:
+        """Three stages: reader thread -> GPU (this thread) -> writer thread, over recycled host buffers.
+
+        Host buffers are pinned on CUDA so copies are async; the writer waits on a CUDA event per frame,
+        so the GPU thread never calls synchronize().
+        """
+        import torch
+
         info, n = self.info, tl.seg_frames
         root = self.cache.root
         s0 = tl.segment_start_source_frame(k0)
         frame_size = ffmpeg_frame_size(info)
+        cuda = str(self.device).startswith("cuda")
         decoder = FrameReader(ffmpeg.decoder_cmd(info, s0, self.hwaccel), root / "ffmpeg-decode.log", frame_size)
         enc = self.profile.encoder
         encoder = FrameWriter(
@@ -219,9 +253,59 @@ class Generator:
                                preset=enc.preset, cq=enc.cq, maxrate=enc.maxrate),
             root / "ffmpeg-encode.log")
 
-        frames: dict[int, bytes] = {}
-        rgb: dict[int, object] = {}
+        def ring(count: int) -> queue.Queue:
+            q: queue.Queue = queue.Queue()
+            for _ in range(count):
+                q.put(torch.empty(frame_size, dtype=torch.uint8, pin_memory=cuda))
+            return q
+
+        in_free, out_free = ring(self.in_ring), ring(self.out_ring)
+        in_q: queue.Queue = queue.Queue()
+        out_q: queue.Queue = queue.Queue()
+        abort = threading.Event()
+        writer_error: list[BaseException] = []
+
+        def read_loop():
+            try:
+                while not abort.is_set():
+                    try:
+                        buf = in_free.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if not decoder.read_into(memoryview(buf.numpy())):
+                        in_q.put(None)
+                        return
+                    in_q.put(buf)
+            except BaseException as exc:  # noqa: BLE001 - handed to the GPU thread
+                in_q.put(exc)
+
+        def write_loop():
+            while True:
+                item = out_q.get()
+                if item is None:
+                    return
+                buf, event = item
+                if not writer_error:
+                    try:
+                        if event is not None:
+                            event.synchronize()
+                        encoder.write(memoryview(buf.numpy()))
+                    except BaseException as exc:  # noqa: BLE001 - encoder died; keep draining
+                        writer_error.append(exc)
+                        abort.set()
+                out_free.put(buf)
+
+        reader = threading.Thread(target=read_loop, name="sf-reader", daemon=True)
+        writer = threading.Thread(target=write_loop, name="sf-writer", daemon=True)
+        reader.start()
+        writer.start()
+
+        host: dict[int, torch.Tensor] = {}   # source index -> host buffer (owned until dropped)
+        dev: dict[int, torch.Tensor] = {}    # source index -> yuv on device
+        rgb: dict[int, torch.Tensor] = {}    # source index -> padded engine input
         kinds: dict[int, object] = {}
+        h2d_events: dict[int, object] = {}
+        scratch = None
         next_idx = s0
         n_actual: int | None = None
         j = j_start = k0 * n
@@ -233,19 +317,30 @@ class Generator:
         def ensure(idx: int) -> None:
             nonlocal next_idx, n_actual
             while next_idx <= idx and n_actual is None:
-                data = decoder.read()
-                if data is None:
+                item = in_q.get()
+                if isinstance(item, BaseException):
+                    raise item
+                if item is None:
                     n_actual = next_idx
                     return
-                frames[next_idx] = data
+                host[next_idx] = item
                 next_idx += 1
 
-        def to_rgb(idx: int):
+        def on_device(idx: int) -> torch.Tensor:
+            if idx not in dev:
+                if cuda:
+                    dev[idx] = host[idx].to(self.device, non_blocking=True)
+                    ev = torch.cuda.Event()
+                    ev.record()
+                    h2d_events[idx] = ev
+                else:
+                    dev[idx] = host[idx].clone()
+            return dev[idx]
+
+        def to_rgb(idx: int) -> torch.Tensor:
             if idx not in rgb:
-                import torch
                 engine, conv = self._engine_pair()
-                buf = torch.frombuffer(bytearray(frames[idx]), dtype=torch.uint8).to(conv.device)
-                rgb[idx] = engine.pad(conv.to_rgb(buf))
+                rgb[idx] = engine.pad(conv.to_rgb(on_device(idx)))
             return rgb[idx]
 
         def pair_kind(i: int):
@@ -258,6 +353,25 @@ class Generator:
                 if kinds[i] is PairKind.CUT:
                     log.info("scene cut after source frame %d (%.3fs)", i, float(i / tl.src_fps))
             return kinds[i]
+
+        def drop_before(i: int) -> None:
+            for old in [x for x in host if x < i]:
+                ev = h2d_events.pop(old, None)
+                if ev is not None:
+                    ev.synchronize()  # long since done; the reader may now overwrite the buffer
+                in_free.put(host.pop(old))
+                dev.pop(old, None)
+                rgb.pop(old, None)
+                kinds.pop(old, None)
+
+        def take_out_buffer() -> torch.Tensor:
+            while True:
+                if writer_error:
+                    raise _Abort()
+                try:
+                    return out_free.get(timeout=0.2)
+                except queue.Empty:
+                    continue
 
         try:
             while j_end is None or j < j_end:
@@ -275,39 +389,53 @@ class Generator:
                         break
                     if p >= n_actual - 1:
                         i, t = n_actual - 1, Fraction(0)
-                if t == 0:
-                    out = frames[i]
-                else:
+                source = i
+                if t != 0:
                     from ..engine.rife import PairKind
                     kind = pair_kind(i)
-                    if kind is PairKind.DUPLICATE:
-                        out = frames[i]
-                    elif kind is PairKind.CUT:
-                        out = frames[scene_cut_frame(i, t)]
+                    if kind is PairKind.CUT:
+                        source = scene_cut_frame(i, t)
                         cuts += 1
+                    elif kind is not PairKind.DUPLICATE:
+                        source = None
+                out = take_out_buffer()
+                if source is not None:
+                    out.copy_(host[source])          # pass-through: the exact source bytes
+                    out_q.put((out, None))
+                else:
+                    engine, conv = self._engine_pair()
+                    mid = engine.interpolate(to_rgb(i), to_rgb(i + 1), float(t))
+                    if scratch is None:
+                        scratch = torch.empty(frame_size, dtype=torch.uint8, device=conv.device)
+                    conv.from_rgb(mid, on_device(i), scratch)
+                    if cuda:
+                        out.copy_(scratch, non_blocking=True)
+                        ev = torch.cuda.Event()
+                        ev.record()
+                        out_q.put((out, ev))
                     else:
-                        engine, conv = self._engine_pair()
-                        mid = engine.interpolate(to_rgb(i), to_rgb(i + 1), float(t))
-                        out = conv.from_rgb(mid).cpu().numpy()
-                encoder.write(out)
-                for old in [x for x in frames if x < i]:
-                    frames.pop(old)
-                    rgb.pop(old, None)
-                    kinds.pop(old, None)
+                        out.copy_(scratch)
+                        out_q.put((out, None))
+                drop_before(i)
                 j += 1
                 now = time.monotonic()
                 if now - last_report >= self.progress_interval:
                     last_report = now
                     self._report(run_id, tl, k0, j_start, j, started, now, cuts)
-        except BrokenPipeError:
+        except _Abort:
             pass  # encoder died; its exit code and log tail are reported below
+        finally:
+            out_q.put(None)
+            writer.join()
+            abort.set()
+            enc_rc = encoder.close()
+            dec_rc = decoder.close()
+            reader.join(timeout=10)
 
-        enc_rc = encoder.close()
-        dec_rc = decoder.close()
         written = j - j_start
         self._report(run_id, tl, k0, j_start, j, started, time.monotonic(), cuts)
 
-        if enc_rc != 0:
+        if enc_rc != 0 or writer_error:
             return self._fail(run_id, k0, written, f"encoder exited with code {enc_rc}", encoder.tail())
         if decoder.eof and dec_rc != 0:
             return self._fail(run_id, k0, written, f"decoder exited with code {dec_rc}", decoder.tail())

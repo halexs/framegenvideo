@@ -1,4 +1,4 @@
-"""CLI: python -m streamerframes {check,probe,plan,render,cache}."""
+"""CLI: python -m streamerframes {check,probe,plan,render,bench,cache}."""
 from __future__ import annotations
 
 import argparse
@@ -97,6 +97,29 @@ def cmd_render(args) -> int:
     return result.exit_code
 
 
+def cmd_bench(args) -> int:
+    from .bench import run_bench, save_entries
+
+    settings = load_settings(args.config)
+    if args.input:
+        info = probe(args.input)
+        width, height = info.width, info.height
+        if args.crop:
+            from .pipeline.letterbox import detect_letterbox
+            crop = detect_letterbox(info, ffmpeg=settings.ffmpeg)
+            if crop:
+                width, height = crop.w, crop.h
+    else:
+        width, height = map(int, args.size.lower().split("x"))
+    scales = [float(s) for s in args.scales.split(",")]
+    results = run_bench(settings.model_path(args.model), args.model, width, height, args.device, scales,
+                        warmup=args.warmup, iters=args.iters)
+    save_entries(settings.cache_root, results)
+    for key, value in results.items():
+        print(f"{key}: {value['ms']:.2f} ms/frame ({1000 / value['ms']:.1f} interpolations/s)")
+    return 0
+
+
 def cmd_cache(args) -> int:
     from .cache.store import CacheStore, LockHeld, video_id_for
 
@@ -169,6 +192,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-hwaccel", action="store_true", help="decode on the CPU")
     p.add_argument("--skip-check", action="store_true")
 
+    p = sub.add_parser("bench", help="time the model and record calibration for scale=auto")
+    p.add_argument("input", nargs="?", help="video to take the resolution from")
+    p.add_argument("--size", default="1920x800", help="WxH when no input is given")
+    p.add_argument("--crop", action="store_true", help="benchmark the letterbox-cropped size")
+    p.add_argument("--model", default="default")
+    p.add_argument("--scales", default="1.0,0.5")
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--warmup", type=int, default=5)
+    p.add_argument("--iters", type=int, default=30)
+
     p = sub.add_parser("cache", help="list, remove or evict cached generations")
     csub = p.add_subparsers(dest="cache_cmd", required=True)
     csub.add_parser("ls")
@@ -194,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_plan(args)
         if args.command == "render":
             return cmd_render(args)
+        if args.command == "bench":
+            return cmd_bench(args)
         if args.command == "cache":
             return cmd_cache(args)
     except (RuntimeError, ValueError, FileNotFoundError) as exc:

@@ -43,8 +43,44 @@ class RifeEngine:
         self.scene_ssim = scene_ssim
         self.dup_mad = dup_mad
         self._t = torch.zeros(1, 1, 1, 1, device=self.device)
+        self._graph = None
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
+
+    @torch.inference_mode()
+    def enable_cuda_graph(self, tolerance: float = 1e-5) -> bool:
+        """Capture the network for the fixed padded shape. Keeps it only if it matches eager output."""
+        if self.device.type != "cuda":
+            return False
+        import logging
+        log = logging.getLogger(__name__)
+        try:
+            shape = (1, 3, self.ph, self.pw)
+            self._g_in0 = torch.rand(shape, device=self.device)
+            self._g_in1 = torch.rand(shape, device=self.device)
+            self._g_t = torch.full((1, 1, 1, 1), 0.5, device=self.device)
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(3):  # warm-up: cudnn autotune, warplayer grid cache
+                    self.run_padded(self._g_in0, self._g_in1, self._g_t)
+            torch.cuda.current_stream().wait_stream(side)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                self._g_out = self.run_padded(self._g_in0, self._g_in1, self._g_t)
+            eager = self.run_padded(self._g_in0, self._g_in1, self._g_t).clone()
+            graph.replay()
+            err = float((self._g_out - eager).abs().max())
+            if err > tolerance:
+                log.warning("CUDA graph output differs from eager by %.2e; using eager", err)
+                return False
+            self._graph = graph
+            log.info("CUDA graph captured for %dx%d", self.pw, self.ph)
+            return True
+        except Exception as exc:  # noqa: BLE001 - graphs are an optimisation only
+            log.warning("CUDA graph capture failed (%s); using eager", exc)
+            self._graph = None
+            return False
 
     @property
     def padded_shape(self) -> tuple[int, int]:
@@ -64,8 +100,15 @@ class RifeEngine:
     @torch.inference_mode()
     def interpolate(self, img0p: torch.Tensor, img1p: torch.Tensor, t: float) -> torch.Tensor:
         """Frame at time ``t`` in (0, 1) between padded inputs. Returns the clamped, unpadded result."""
-        self._t.fill_(float(t))
-        out = self.run_padded(img0p, img1p, self._t)
+        if self._graph is not None:
+            self._g_in0.copy_(img0p)
+            self._g_in1.copy_(img1p)
+            self._g_t.fill_(float(t))
+            self._graph.replay()
+            out = self._g_out
+        else:
+            self._t.fill_(float(t))
+            out = self.run_padded(img0p, img1p, self._t)
         return out[:, :, : self.h, : self.w].clamp(0, 1)
 
     @torch.inference_mode()
