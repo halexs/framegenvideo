@@ -62,7 +62,7 @@ def frame_tolerance(n: int) -> int:
 
 
 def default_engine_factory(info: VideoInfo, profile: Profile, model_dir: Path, scale: float, device: str,
-                           crop=None):
+                           crop=None, cache_root: Path | None = None):
     def build():
         from ..engine.color import ColorSpec, CroppedConverter, YuvConverter
         from ..engine.loader import load_ifnet
@@ -73,11 +73,33 @@ def default_engine_factory(info: VideoInfo, profile: Profile, model_dir: Path, s
                          ColorSpec.from_names(info.color_space, info.color_range, info.height), device), crop)
         h, w = conv.size
         net = load_ifnet(model_dir, device)
-        engine = RifeEngine(net, h, w, scale, device, scene_ssim=profile.scene_ssim, dup_mad=profile.dup_mad)
-        if profile.cuda_graphs:
-            engine.enable_cuda_graph()
+        engine = None
+        if profile.backend == "tensorrt":
+            engine = _tensorrt_engine(net, h, w, scale, device, profile, cache_root)
+        if engine is None:
+            engine = RifeEngine(net, h, w, scale, device, scene_ssim=profile.scene_ssim, dup_mad=profile.dup_mad)
+            if profile.cuda_graphs:
+                engine.enable_cuda_graph()
         return engine, conv
     return build
+
+
+def _tensorrt_engine(net, h, w, scale, device, profile: Profile, cache_root):
+    """A TrtRifeEngine if TensorRT and a built engine exist for this size; else None (PyTorch is used)."""
+    from ..bench import gpu_name
+    from ..engine.rife import RifeEngine
+    from ..engine.trt_backend import TrtRifeEngine, engine_path, tensorrt_available
+
+    if not (cache_root and str(device).startswith("cuda") and tensorrt_available()):
+        log.warning("backend=tensorrt but TensorRT/CUDA is unavailable; using PyTorch")
+        return None
+    ph, pw = RifeEngine(net, h, w, scale, "cpu").padded_shape
+    path = engine_path(cache_root, gpu_name(device), profile.model, pw, ph, scale)
+    if not path.exists():
+        log.warning("no TensorRT engine at %s (run `python -m streamerframes trt build`); using PyTorch", path)
+        return None
+    log.info("using TensorRT engine %s", path)
+    return TrtRifeEngine(net, h, w, scale, device, path, scene_ssim=profile.scene_ssim, dup_mad=profile.dup_mad)
 
 
 class _Abort(Exception):
@@ -89,7 +111,7 @@ class Generator:
                  model_dir: Path | None = None, device: str = "cuda", hwaccel: bool = True,
                  engine_factory: Callable | None = None, stop_event: threading.Event | None = None,
                  progress_interval: float = 2.0, on_progress: Callable[[dict], None] | None = None,
-                 crop=None, in_ring: int = 6, out_ring: int = 8):
+                 crop=None, in_ring: int = 6, out_ring: int = 8, cache_root: Path | None = None):
         self.info = info
         self.profile = profile
         self.cache = cache
@@ -99,7 +121,7 @@ class Generator:
         self.crop = crop
         self.in_ring, self.out_ring = in_ring, out_ring
         self.engine_factory = engine_factory or default_engine_factory(info, profile, model_dir, scale, device,
-                                                                       crop)
+                                                                       crop, cache_root)
         self.stop_event = stop_event or threading.Event()
         self.progress_interval = progress_interval
         self.on_progress = on_progress

@@ -36,6 +36,7 @@ class Profile:
     dup_mad: float = 0.0               # mean abs diff below this = duplicate frame (0 disables)
     letterbox_crop: bool = True
     cuda_graphs: bool = True
+    backend: str = "torch"             # torch | tensorrt (experimental, see `trt compare`)
     encoder: EncoderSettings = field(default_factory=EncoderSettings)
 
     def pixel_settings(self) -> dict:
@@ -43,6 +44,7 @@ class Profile:
         data = asdict(self)
         data.pop("name")
         data.pop("cuda_graphs")        # equivalent output, only speed differs
+        data.pop("backend")
         if data["mode"] == "multi":
             data.pop("target_fps")
         else:

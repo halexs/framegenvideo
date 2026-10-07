@@ -8,3 +8,6 @@ numpy
 psutil
 pytest
 httpx
+# Optional, for the experimental TensorRT backend (python -m streamerframes trt ...):
+#   pip install onnx onnxruntime onnxscript
+#   plus TensorRT 8.6 (TensorRT-8.6.1.6\python\tensorrt-8.6.1-cp311-none-win_amd64.whl); TRT >= 10 dropped Pascal.
