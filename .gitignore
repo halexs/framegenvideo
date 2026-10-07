@@ -19,3 +19,7 @@ __pycache__
 .venv/
 .framegen/
 legacy/__pycache__/
+streamerframes.toml
+cache/
+models/
+*.engine

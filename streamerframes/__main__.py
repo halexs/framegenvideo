@@ -1,4 +1,4 @@
-"""CLI: python -m streamerframes {probe,plan}. render/serve arrive in later phases (PLAN.md)."""
+"""CLI: python -m streamerframes {check,probe,plan}. render/serve arrive in later phases (PLAN.md)."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,9 @@ import logging
 import sys
 from fractions import Fraction
 
+from .config import load_settings
 from .probe import probe
+from .selfcheck import failed, format_checks, run_checks
 from .timeline import Timeline, out_fps_for_multiplier, out_fps_for_target
 
 
@@ -21,6 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="streamerframes")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("check", help="verify GPU, torch, ffmpeg/NVENC and model files")
+    p.add_argument("--model", default="default")
+    p.add_argument("--cpu", action="store_true", help="don't require CUDA/NVENC")
+
     p = sub.add_parser("probe", help="print stream info for a video")
     p.add_argument("input")
 
@@ -33,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+
+    if args.command == "check":
+        checks = run_checks(load_settings(), args.model, need_gpu=not args.cpu)
+        print(format_checks(checks))
+        return 1 if failed(checks) else 0
 
     try:
         info = probe(args.input)

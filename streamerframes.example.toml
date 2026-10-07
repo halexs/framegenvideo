@@ -1,0 +1,36 @@
+# Copy to streamerframes.toml (gitignored) and edit. Every key is optional.
+# Environment overrides: MOVIES_DIR (os.pathsep-separated), CACHE_DIR, MODEL_DIR, HOST, PORT,
+# STREAMERFRAMES_CONFIG (path to this file).
+
+movies_roots = ["E:/Movies"]
+cache_root   = "E:/StreamerFrames/cache"
+export_dir   = ""                     # empty = inside the cache; else e.g. "E:/Movies/_framegen"
+model_dir    = "E:/StreamerFrames/Practical-RIFE/train_log"   # IFNet_HDv3.py + flownet.pkl
+models_dir   = "E:/StreamerFrames/Practical-RIFE/models"      # optional extra models: models/<name>/...
+host = "127.0.0.1"                    # "0.0.0.0" for LAN access; there is no authentication
+port = 8000
+cache_max_gb = 200                    # LRU eviction of non-exported, idle caches
+auto_resume = true                    # re-queue interrupted offline jobs on server start
+fill_gaps = true                      # after streaming, fill holes left by seeks in the background
+stream_policy = "newest_wins"         # or "queue"
+watch_dirs = []                       # new videos here get an offline "quality" job
+
+[profiles.realtime]
+mode = "multi"
+multi = 2
+scale = "auto"                        # auto picks 1.0 or 0.5 from benchmark calibration
+model = "default"
+scene_detect = true
+letterbox_crop = true
+cuda_graphs = true
+encoder = { codec = "h264_nvenc", preset = "p4", cq = 21, maxrate = "20M" }
+
+[profiles.quality]
+mode = "target"
+target_fps = 60                       # 59.94 for 23.976/29.97 sources
+scale = 1.0
+model = "default"
+scene_detect = true
+letterbox_crop = true
+cuda_graphs = true
+encoder = { codec = "h264_nvenc", preset = "p6", cq = 18, maxrate = "40M" }
