@@ -52,6 +52,22 @@ real measurements (without calibration it falls back to: full scale up to 720p, 
 - **Watch folders:** `watch_dirs = ["E:/Movies/incoming"]` queues an offline `watch_profile` job for each new
   file once it has finished copying. Files already there when a folder is first watched are left alone.
 
+## TensorRT (experimental, PLAN.md Phase 6)
+
+Off by default. A go/no-go experiment for the 1080 Ti: TensorRT 8.6 is the last version that supports Pascal, and
+only FP32 makes sense there.
+
+```
+pip install onnx onnxruntime onnxscript  (+ the TensorRT 8.6 wheel; see requirements-streamerframes.txt)
+python -m streamerframes trt export  "E:\Movies\Batman Begins.mp4" --crop   # ONNX + check vs PyTorch (< 1e-3)
+python -m streamerframes trt build   "E:\Movies\Batman Begins.mp4" --crop   # FP32 engine in cache/engines/
+python -m streamerframes trt compare "E:\Movies\Batman Begins.mp4" --crop   # speed + PSNR -> GO / NO-GO
+```
+
+GO means at least 1.25× faster than PyTorch + CUDA graphs with PSNR ≥ 45 dB. Only then set
+`backend = "tensorrt"` in a profile. Missing TensorRT or a missing engine for a size falls back to PyTorch with
+a warning. If it's NO-GO, record the numbers below and leave the backend off.
+
 ## Command line
 
 ```
@@ -64,6 +80,7 @@ python -m streamerframes render <video> [--profile quality|realtime] [--target-f
                                 [--scale auto|1.0|0.5] [--model NAME|auto] [--export out.mp4 | --no-export]
                                 [--export-codec copy|hevc]
 python -m streamerframes cache ls | rm <video_id|path> | gc [--max-gb N]
+python -m streamerframes trt export|build|compare [<video> --crop | --size WxH] [--scale 1.0]
 ```
 
 `render` is resumable: Ctrl+C stops after the current segment, killing it loses at most one segment, and

@@ -1,4 +1,4 @@
-"""CLI: python -m streamerframes {serve,check,probe,plan,render,bench,cache}."""
+"""CLI: python -m streamerframes {serve,check,probe,plan,render,bench,cache,trt}."""
 from __future__ import annotations
 
 import argparse
@@ -149,6 +149,68 @@ def cmd_bench(args) -> int:
     return 0
 
 
+def cmd_trt(args) -> int:
+    """Phase 6 go/no-go: export ONNX (+ verify), build an FP32 engine, compare against PyTorch."""
+    from .engine.loader import load_ifnet
+    from .engine.onnx_export import export_onnx, verify_onnx
+    from .engine.rife import RifeEngine
+
+    settings = load_settings(args.config)
+    if args.input:
+        info = probe(args.input)
+        width, height = info.width, info.height
+        if args.crop:
+            from .pipeline.letterbox import detect_letterbox
+            crop = detect_letterbox(info, ffmpeg=settings.ffmpeg)
+            if crop:
+                width, height = crop.w, crop.h
+    else:
+        width, height = map(int, args.size.lower().split("x"))
+    device = args.device
+    net = load_ifnet(settings.model_path(args.model), device if args.trt_cmd != "export" else "cpu")
+    ph, pw = RifeEngine(net, height, width, args.scale, "cpu").padded_shape
+    onnx_path = settings.cache_path / "engines" / f"{args.model}_{pw}x{ph}_s{args.scale}.onnx"
+
+    if args.trt_cmd == "export":
+        export_onnx(net, ph, pw, args.scale, onnx_path)
+        err = verify_onnx(net, onnx_path, ph, pw, args.scale)
+        print(f"{onnx_path}\nONNX Runtime vs PyTorch max abs error: {err:.2e} "
+              f"({'ok' if err < 1e-3 else 'TOO HIGH (plan: < 1e-3)'})")
+        return 0 if err < 1e-3 else 1
+
+    from .bench import bench_engine, gpu_name
+    from .engine.trt_backend import TrtRifeEngine, build_engine, engine_path
+    path = engine_path(settings.cache_root, gpu_name(device), args.model, pw, ph, args.scale)
+    if args.trt_cmd == "build":
+        if not onnx_path.exists():
+            print(f"error: {onnx_path} not found; run `trt export` first", file=sys.stderr)
+            return 1
+        build_engine(onnx_path, path, args.workspace_gb)
+        print(path)
+        return 0
+
+    # compare
+    import torch
+    torch_engine = RifeEngine(net, height, width, args.scale, device)
+    graphs = torch_engine.enable_cuda_graph()
+    trt_engine = TrtRifeEngine(net, height, width, args.scale, device, path)
+    torch_ms = bench_engine(torch_engine, args.warmup, args.iters)
+    trt_ms = bench_engine(trt_engine, args.warmup, args.iters)
+    g = torch.Generator(device="cpu").manual_seed(0)
+    a = torch_engine.pad(torch.rand(1, 3, height, width, generator=g).to(device))
+    b = torch_engine.pad(torch.rand(1, 3, height, width, generator=g).to(device))
+    ref = torch_engine.interpolate(a, b, 0.5).clone()
+    out = trt_engine.interpolate(a, b, 0.5)
+    mse = float(((out - ref) ** 2).mean())
+    psnr = float("inf") if mse == 0 else 10 * torch.log10(torch.tensor(1.0 / mse)).item()
+    speedup = torch_ms / trt_ms
+    go = speedup >= 1.25 and psnr >= 45
+    print(f"{width}x{height} scale {args.scale}: PyTorch{' + CUDA graphs' if graphs else ''} {torch_ms:.1f} ms, "
+          f"TensorRT {trt_ms:.1f} ms ({speedup:.2f}x), PSNR {psnr:.1f} dB -> {'GO' if go else 'NO-GO'}"
+          " (plan: >= 1.25x and >= 45 dB)")
+    return 0
+
+
 def cmd_cache(args) -> int:
     from .cache.store import CacheStore, LockHeld, video_id_for
 
@@ -238,6 +300,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=30)
 
+    p = sub.add_parser("trt", help="TensorRT backend (experimental): export, build, compare")
+    tsub = p.add_subparsers(dest="trt_cmd", required=True)
+    for name, text in (("export", "export ONNX and verify it against PyTorch with ONNX Runtime"),
+                       ("build", "build an FP32 TensorRT engine from the exported ONNX"),
+                       ("compare", "speed and PSNR of TensorRT vs PyTorch + CUDA graphs (go/no-go)")):
+        t = tsub.add_parser(name, help=text)
+        t.add_argument("input", nargs="?", help="video to take the resolution from")
+        t.add_argument("--size", default="1920x800")
+        t.add_argument("--crop", action="store_true")
+        t.add_argument("--model", default="default")
+        t.add_argument("--scale", type=float, default=1.0)
+        t.add_argument("--device", default="cuda")
+        t.add_argument("--workspace-gb", type=float, default=2.0)
+        t.add_argument("--warmup", type=int, default=5)
+        t.add_argument("--iters", type=int, default=30)
+
     p = sub.add_parser("cache", help="list, remove or evict cached generations")
     csub = p.add_subparsers(dest="cache_cmd", required=True)
     csub.add_parser("ls")
@@ -269,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_bench(args)
         if args.command == "cache":
             return cmd_cache(args)
+        if args.command == "trt":
+            return cmd_trt(args)
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

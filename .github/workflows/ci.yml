@@ -13,6 +13,6 @@ jobs:
           python-version: "3.11"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install fastapi uvicorn httpx pytest ruff numpy psutil
+      - run: pip install fastapi uvicorn httpx pytest ruff numpy psutil onnx onnxruntime onnxscript
       - run: ruff check streamerframes tests tools --select E9,F
       - run: pytest -q

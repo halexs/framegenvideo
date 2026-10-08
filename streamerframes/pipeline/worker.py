@@ -159,7 +159,8 @@ def run_job(job: Job, settings: Settings | None = None, stop_event: threading.Ev
     try:
         gen = Generator(info, profile, cache, scale=scale, model_dir=settings.model_path(profile.model),
                         device=job.device, hwaccel=job.hwaccel, engine_factory=engine_factory,
-                        stop_event=stop_event, on_progress=on_progress, crop=crop)
+                        stop_event=stop_event, on_progress=on_progress, crop=crop,
+                        cache_root=Path(settings.cache_root))
         free_mb = _free_vram_mb(job.device)
         if free_mb is not None and free_mb < settings.min_free_vram_mb:
             msg = (f"only {free_mb} MB of GPU memory free (need {settings.min_free_vram_mb}); "
