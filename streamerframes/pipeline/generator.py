@@ -1,6 +1,7 @@
 """One generation run: fill the first hole of segments in a profile cache (PLAN.md Phase 1)."""
 from __future__ import annotations
 
+import collections
 import logging
 import math
 import queue
@@ -314,6 +315,7 @@ class Generator:
         discard = threading.Event()
         cuts = 0
         started = last_report = time.monotonic()
+        self._samples = collections.deque()  # (time, out frame) for a rolling speed estimate
 
         def ensure(idx: int) -> None:
             nonlocal next_idx, n_actual
@@ -473,12 +475,22 @@ class Generator:
         return RunResult("failed", run_id, k0, written, error)
 
     def _report(self, run_id, tl, k0, j_start, j, started, now, cuts) -> None:
-        elapsed = max(now - started, 1e-6)
+        # Speed over the last ~60 s of output. Averaging from the start of the run would count model
+        # loading and cudnn autotuning (often 10-30 s) and show near-zero speed and a huge ETA at first.
+        samples = getattr(self, "_samples", None)
+        if samples is None:
+            samples = self._samples = collections.deque()
+        samples.append((now, j))
+        while len(samples) > 2 and now - samples[0][0] > 60:
+            samples.popleft()
+        first = next(((t, f) for t, f in samples if f > j_start), None)
+        if first and now - first[0] >= 1.0 and j > first[1]:
+            rate = (j - first[1]) / (now - first[0])
+        else:
+            rate = 0.0
         done = j - j_start
-        video_secs = done / tl.out_fps
-        ratio = float(video_secs) / elapsed
+        ratio = float(rate / tl.out_fps)
         remaining = max(tl.total_out_frames - j, 0)
-        rate = done / elapsed
         data = {
             "run": run_id,
             "start_segment": k0,
@@ -490,7 +502,7 @@ class Generator:
             "realtime_ratio": round(ratio, 4),
             "eta_seconds": round(remaining / rate, 1) if rate > 0 else None,
             "scene_cuts": cuts,
-            "started_at": time.time() - elapsed,
+            "started_at": time.time() - (now - started),
         }
         gpu = _gpu_mem_mb(self.device)
         if gpu is not None:
