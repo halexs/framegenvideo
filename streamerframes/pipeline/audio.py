@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
 from ..probe import VideoInfo
@@ -19,7 +20,7 @@ def audio_state(audio_dir: Path) -> str:
     return "none" if done.read_text().strip() == "none" else "done"
 
 
-def ensure_audio(info: VideoInfo, audio_dir: Path) -> str:
+def ensure_audio(info: VideoInfo, audio_dir: Path, stop_event=None) -> str:
     audio_dir = Path(audio_dir)
     state = audio_state(audio_dir)
     if state != "missing":
@@ -32,7 +33,14 @@ def ensure_audio(info: VideoInfo, audio_dir: Path) -> str:
         old.unlink()
     (audio_dir / "audio.csv").unlink(missing_ok=True)
     proc = FfmpegProcess(ffmpeg.audio_cmd(info, audio_dir), audio_dir / "ffmpeg-audio.log")
-    rc = proc.wait()
+    while True:
+        try:
+            rc = proc.wait(timeout=0.5)
+            break
+        except subprocess.TimeoutExpired:
+            if stop_event is not None and stop_event.is_set():
+                proc.kill()
+                return "missing"
     if rc != 0:
         raise RuntimeError(f"audio encode failed ({rc}): " + " | ".join(proc.tail(5)))
     (audio_dir / "DONE").write_text("done")

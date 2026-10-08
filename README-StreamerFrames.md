@@ -15,9 +15,29 @@ either offline (render a file) or streamed to a browser while it generates. Buil
 6. Optional: copy `streamerframes.example.toml` to `streamerframes.toml` and edit paths.
 7. `python -m streamerframes check` must pass.
 
+## Web UI
+
+`start_server.bat` (or `python -m streamerframes serve`) starts the UI on http://localhost:8000.
+
+- **Library:** every video under `movies_roots`, with its generation status and buttons: Original,
+  Framegen (stream now), Generate in background (offline `quality` job), Export, Download, Delete cache.
+- **Framegen** starts a `stream` job and plays the HLS output while it is generated. The status line shows
+  how much is ready, speed (× real time), and whether playing now will run without stalling
+  (lead `B ≥ remaining × (1 − speed)`); otherwise how long to wait. Playback starts by itself once it's safe.
+- **Compare** shows the original and the framegen version side by side, synced.
+- **One GPU worker at a time.** Streaming outranks offline jobs (offline work pauses after its current
+  segment and resumes afterwards); by default a new stream replaces an older one (`stream_policy`). Jobs
+  survive server restarts: running workers are adopted, interrupted offline jobs resume (`auto_resume`).
+- Host is `127.0.0.1` by default. Set `host = "0.0.0.0"` to use it from other devices; there's no login.
+- Logs: `cache/server.log` (rotated), and per generation `worker.log` / `ffmpeg-*.log` in its cache folder.
+
+Run `python -m streamerframes bench <movie> --crop` once before streaming so `scale=auto` can choose from
+real measurements (without calibration it falls back to: full scale up to 720p, half scale above).
+
 ## Command line
 
 ```
+python -m streamerframes serve [--host H --port P]   # web UI + job manager
 python -m streamerframes check                      # GPU, torch arch, ffmpeg/NVENC, model files
 python -m streamerframes probe <video>              # stream info as JSON
 python -m streamerframes plan <video> --target-fps 60
@@ -46,6 +66,9 @@ source's audio and subtitles copied.
   `synchronize()` (the writer waits on a CUDA event per frame). Source frames are uploaded and converted once
   (YUV420 ↔ RGB on the GPU with the right BT.709/601 matrix). CUDA graphs replay the network for the fixed
   frame size. Letterboxed films are detected once (`cropdetect` at 8 points) and only the picture is inferred.
+- **Audio** for streaming is a separate AAC HLS rendition encoded alongside the video. The encoder's 1024
+  priming samples are trimmed so audio isn't 21 ms late; a beep/flash test checks sync through the real
+  HLS output, across a resume.
 - **scale=auto.** `bench` records ms/frame per (GPU, model, size, scale, graphs) in `cache/calibration.json`.
   `realtime` picks the highest-quality scale that sustains 1.1× the needed interpolation rate. The choice is
   remembered per video, so the cache id never changes under you.

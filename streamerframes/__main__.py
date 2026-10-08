@@ -1,4 +1,4 @@
-"""CLI: python -m streamerframes {check,probe,plan,render,bench,cache}."""
+"""CLI: python -m streamerframes {serve,check,probe,plan,render,bench,cache}."""
 from __future__ import annotations
 
 import argparse
@@ -97,6 +97,29 @@ def cmd_render(args) -> int:
     return result.exit_code
 
 
+def cmd_serve(args) -> int:
+    import uvicorn
+
+    from .web.app import create_app, setup_logging
+
+    settings = load_settings(args.config)
+    host = args.host or settings.host
+    port = args.port or settings.port
+    if not args.skip_check:
+        checks = run_checks(settings, need_gpu=True)
+        if failed(checks):
+            print("warning: self-check failed; generation will not work until this is fixed:\n"
+                  + format_checks(checks), file=sys.stderr)
+    setup_logging(settings.cache_path, logging.DEBUG if args.verbose else logging.INFO)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"note: serving on {host} without authentication; anyone on your network can use it",
+              file=sys.stderr)
+    print(f"StreamerFrames on http://{'localhost' if host in ('0.0.0.0', '::') else host}:{port}/", file=sys.stderr)
+    uvicorn.run(create_app(settings, config_path=args.config), host=host, port=port, log_level="warning",
+                access_log=False)
+    return 0
+
+
 def cmd_bench(args) -> int:
     from .bench import run_bench, save_entries
 
@@ -160,6 +183,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="path to streamerframes.toml")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("serve", help="run the web UI and job manager")
+    p.add_argument("--host")
+    p.add_argument("--port", type=int)
+    p.add_argument("--skip-check", action="store_true")
 
     p = sub.add_parser("check", help="verify GPU, torch, ffmpeg/NVENC and model files")
     p.add_argument("--model", default="default")
@@ -225,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "plan":
             return cmd_plan(args)
+        if args.command == "serve":
+            return cmd_serve(args)
         if args.command == "render":
             return cmd_render(args)
         if args.command == "bench":
