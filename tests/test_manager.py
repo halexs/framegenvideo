@@ -168,3 +168,38 @@ def test_unresponsive_worker_is_killed(tmp_path):
     rec2 = m.submit(video(tmp_path, "hang.mp4"), "offline", "realtime")
     wait_for(lambda: (m.tick() or True) and rec2.state == "failed")
     assert "watchdog" in rec2.error
+
+
+def test_retarget_restarts_running_stream_at_segment(mgr, tmp_path):
+    rec = mgr.submit(video(tmp_path, "slow.mp4"), "stream", "realtime")
+    wait_for(lambda: rec.state == "running")
+    assert mgr.retarget(rec, 7)
+    assert rec.cache.stop_now_requested() or rec.state != "running"
+    wait_for(lambda: rec.runs == 2 and rec.state == "running")
+    wait_for(lambda: len(calls(rec)) == 2)
+    assert calls(rec) == ["stream start=0", "stream start=7"]
+    assert not mgr.retarget(rec, 9)  # debounced: scrubbing doesn't thrash restarts
+    assert mgr.retarget(rec, 7)       # already there
+    mgr.cancel(rec.id)
+    wait_for(lambda: rec.state == "cancelled")
+
+
+def test_stream_from_reuses_or_starts_job(mgr, tmp_path):
+    rec = mgr.stream_from(video(tmp_path, "slow.mp4"), "realtime", 4)
+    assert rec.start_segment == 4 and rec.kind == "stream"
+    wait_for(lambda: len(calls(rec)) == 1)
+    assert calls(rec) == ["stream start=4"]
+    mgr.cancel(rec.id)
+    wait_for(lambda: rec.state == "cancelled")
+
+
+def test_finished_stream_stretch_queues_gap_filler(mgr, tmp_path):
+    rec = mgr.submit(video(tmp_path, "partial.mp4"), "stream", "realtime", start_segment=5)
+    wait_for(lambda: rec.state == "paused")
+    filler = next(r for r in mgr.jobs.values() if r is not rec)
+    assert filler.kind == "offline" and filler.profile_id == rec.profile_id and filler.start_segment == 0
+    wait_for(lambda: filler.state in ("paused", "running", "queued"))
+    mgr.settings.fill_gaps = False
+    other = mgr.submit(video(tmp_path, "partial.mp4"), "stream", "quality")
+    wait_for(lambda: other.state == "paused")
+    assert not any(r.profile_id == other.profile_id and r is not other for r in mgr.jobs.values())

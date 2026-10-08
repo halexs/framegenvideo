@@ -216,7 +216,7 @@ class Generator:
         end = self.cache.gap_end(completed, k0, tl.total_segments)
         run_id = self.cache.next_run_id()
         self.cache.acquire_lock(run_id)
-        self.cache.clear_stop()
+        # Don't clear a pending stop here: a seek can retarget the job while this worker is still starting.
         self.manifest.update(status="running", error=None, error_tail=None)
         self.cache.write_manifest(self.manifest)
         keep_awake(True)
@@ -286,7 +286,7 @@ class Generator:
                 if item is None:
                     return
                 buf, event = item
-                if not writer_error:
+                if not writer_error and not discard.is_set():
                     try:
                         if event is not None:
                             event.synchronize()
@@ -311,7 +311,8 @@ class Generator:
         n_actual: int | None = None
         j = j_start = k0 * n
         j_end = end * n if end < tl.total_segments else None
-        stopped = False
+        stopped = abandoned = False
+        discard = threading.Event()
         cuts = 0
         started = last_report = time.monotonic()
         self._samples = collections.deque()  # (time, out frame) for a rolling speed estimate
@@ -380,6 +381,9 @@ class Generator:
                 if j > j_start and j % n == 0 and self._stop():
                     stopped = True
                     break
+                if j % 8 == 0 and self.cache.stop_now_requested():
+                    stopped = abandoned = True  # drop the partial segment; it never reaches the index
+                    break
                 p = j * tl.ratio
                 i = math.floor(p)
                 t = p - i
@@ -427,17 +431,20 @@ class Generator:
         except _Abort:
             pass  # encoder died; its exit code and log tail are reported below
         finally:
+            if abandoned:
+                discard.set()
+                encoder.kill()  # killed mid-segment: ffmpeg never lists the partial file
             out_q.put(None)
             writer.join()
             abort.set()
-            enc_rc = encoder.close()
+            enc_rc = 0 if abandoned else encoder.close()
             dec_rc = decoder.close()
             reader.join(timeout=10)
 
         written = j - j_start
         self._report(run_id, tl, k0, j_start, j, started, time.monotonic(), cuts)
 
-        if enc_rc != 0 or writer_error:
+        if not abandoned and (enc_rc != 0 or writer_error):
             return self._fail(run_id, k0, written, f"encoder exited with code {enc_rc}", encoder.tail())
         if decoder.eof and dec_rc != 0:
             return self._fail(run_id, k0, written, f"decoder exited with code {dec_rc}", decoder.tail())

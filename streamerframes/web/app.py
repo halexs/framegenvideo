@@ -1,6 +1,7 @@
 """FastAPI app: movie library, jobs API, HLS playback (PLAN.md Phase 3). Clients only ever send opaque IDs."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import threading
@@ -10,13 +11,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..cache import playlist
 from ..cache.store import CacheStore, LockHeld, ProfileCache, video_id_for
 from ..config import Settings, load_settings
-from ..jobs.manager import JobManager, job_view
+from ..jobs.manager import JobManager, job_view, segment_ranges
 from ..pipeline.audio import audio_state
 from ..probe import probe
 
@@ -84,8 +86,13 @@ def setup_logging(cache_root: Path, level=logging.INFO) -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)  # segment fetches would flood the log
 
 
+LONG_POLL_SECONDS = 25.0
+NEAR_FRONTIER = 3  # segments ahead of a run's frontier that are worth waiting for instead of retargeting
+
+
 def create_app(settings: Settings | None = None, manager: JobManager | None = None,
-               config_path: str | None = None, start_manager: bool = True) -> FastAPI:
+               config_path: str | None = None, start_manager: bool = True,
+               long_poll_seconds: float = LONG_POLL_SECONDS) -> FastAPI:
     settings = settings or load_settings(config_path)
     store = CacheStore(settings.cache_root)
     library = Library(settings.movies_roots)
@@ -198,6 +205,19 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
             raise HTTPException(400, str(exc)) from None
         return job_view(rec)
 
+    @app.get("/api/status/{video_id}/{profile_id}")
+    def api_status(video_id: str, profile_id: str):
+        """What the watch page polls: cache state, completed ranges (for seeking) and the active job."""
+        pc = profile_cache(video_id, profile_id)
+        m = pc.manifest()
+        from fractions import Fraction
+        seg_secs = float(Fraction(m["seg_frames"]) / Fraction(m["out_fps"]))
+        job = manager.active_for(video_id, profile_id)
+        return {**cache_summary(pc), "ranges": segment_ranges(pc.completed_segments()), "seg_seconds": seg_secs,
+                "segments_total": m["total_segments"],
+                "duration_seconds": m["total_out_frames"] / float(Fraction(m["out_fps"])),
+                "job": job_view(job) if job else None}
+
     @app.get("/api/jobs")
     def api_jobs():
         return {"jobs": [job_view(j) for j in manager.list()[:100]]}
@@ -281,7 +301,9 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
     @app.get("/hls/{video_id}/{profile_id}/video.m3u8")
     def hls_video(video_id: str, profile_id: str):
         pc = profile_cache(video_id, profile_id)
-        return Response(playlist.video_playlist(pc), media_type=M3U8, headers=NO_CACHE)
+        # Phase 4: the whole timeline up front (segment boundaries are deterministic), so players can seek
+        # anywhere; segments that aren't generated yet are long-polled below.
+        return Response(playlist.video_playlist(pc, full=True), media_type=M3U8, headers=NO_CACHE)
 
     @app.get("/hls/{video_id}/audio.m3u8")
     def hls_audio(video_id: str):
@@ -290,11 +312,41 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
             raise HTTPException(404, "no audio rendition")
         return Response(playlist.audio_playlist(audio_dir), media_type=M3U8, headers=NO_CACHE)
 
+    def ensure_generating(video_id: str, pc: ProfileCache, n: int) -> None:
+        """Segment n was requested but isn't ready: wait for the current run, or point generation at it."""
+        rec = manager.active_for(video_id, pc.profile_id)
+        if rec is not None and rec.state == "running":
+            progress = pc.progress() or {}
+            current = progress.get("start_segment") == rec.start_segment
+            frontier = progress.get("segment_frontier", rec.start_segment) if current else rec.start_segment
+            if rec.start_segment <= n <= max(frontier, rec.start_segment) + NEAR_FRONTIER:
+                return
+        if rec is not None:
+            manager.retarget(rec, n)
+            return
+        m = pc.manifest() or {}
+        profile = str(m.get("profile_name") or "realtime").split("+")[0]
+        if profile not in settings.profiles:
+            return
+        manager.stream_from(str(library.path(video_id)), profile, n)
+
     @app.get("/hls/{video_id}/{profile_id}/seg/{n}.ts")
-    def hls_segment(video_id: str, profile_id: str, n: int):
+    async def hls_segment(video_id: str, profile_id: str, n: int):
         pc = profile_cache(video_id, profile_id)
-        if n not in pc.completed_segments():
-            raise HTTPException(404, "segment not generated yet")
+        total = (pc.manifest() or {}).get("total_segments", 0)
+        if not 0 <= n < total:
+            raise HTTPException(404, "no such segment")
+
+        def ready() -> bool:
+            return n in pc.completed_segments()
+
+        if not await run_in_threadpool(ready):
+            await run_in_threadpool(ensure_generating, video_id, pc, n)
+            deadline = time.monotonic() + long_poll_seconds
+            while not await run_in_threadpool(ready):
+                if time.monotonic() >= deadline:
+                    return Response("generating", status_code=503, headers={"Retry-After": "2", **NO_CACHE})
+                await asyncio.sleep(0.25)
         return FileResponse(pc.segment_path(n), media_type="video/mp2t", headers=LONG_CACHE)
 
     @app.get("/hls/{video_id}/audio/{n}.ts")

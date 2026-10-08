@@ -60,6 +60,7 @@ class JobRecord:
     stop_requested_at: float | None = None
     error: str | None = None
     runs: int = 0
+    last_retarget: float | None = None
 
     @property
     def cache(self) -> ProfileCache:
@@ -71,8 +72,12 @@ Resolved = tuple[str, str, str]  # video_id, profile_id, cache_dir
 
 def default_resolver(settings: Settings) -> Callable[[str, str, str], Resolved]:
     def resolve_job(video_path: str, profile: str, kind: str) -> Resolved:
+        from ..pipeline.generator import Generator
         from ..pipeline.worker import Job, resolve
-        _, vid, _, _, cache, _ = resolve(settings, Job(video_path=video_path, profile=profile, kind=kind))
+        info, vid, prof, scale, cache, crop = resolve(settings, Job(video_path=video_path, profile=profile,
+                                                                    kind=kind))
+        # Writes manifest.json now (no model load), so playlists and status exist before the worker starts.
+        Generator(info, prof, cache, scale=scale, crop=crop)
         return vid, cache.profile_id, str(cache.root)
     return resolve_job
 
@@ -223,6 +228,36 @@ class JobManager:
         self.tick()
         return rec
 
+    def retarget(self, rec: JobRecord, segment: int, debounce: float = 3.0) -> bool:
+        """Point a stream job at ``segment`` (a seek). Running workers abandon their current segment.
+
+        Debounced so scrubbing doesn't restart ffmpeg and the model over and over.
+        """
+        with self._lock:
+            now = time.time()
+            if rec.start_segment == segment and rec.state in ACTIVE:
+                return True
+            if rec.last_retarget and now - rec.last_retarget < debounce:
+                return False
+            rec.last_retarget = now
+            rec.start_segment = segment
+            rec.kind = "stream"
+            if rec.state == "running":
+                self._request_stop(rec, "retarget", now=True)
+            else:
+                rec.state, rec.stop_reason, rec.error = "queued", None, None
+                self._changed(rec)
+            log.info("job %s retargeted to segment %d", rec.id, segment)
+        self.tick()
+        return True
+
+    def stream_from(self, video_path: str, profile: str, segment: int) -> JobRecord:
+        """Make sure a stream job is generating from ``segment`` (seek into a hole)."""
+        rec = self.submit(video_path, "stream", profile, start_segment=segment)
+        if rec.start_segment != segment:
+            self.retarget(rec, segment)
+        return rec
+
     def cancel(self, job_id: str) -> JobRecord:
         with self._lock:
             rec = self.jobs[job_id]
@@ -296,10 +331,10 @@ class JobManager:
             rec.error = f"watchdog: no progress for {int(now - last)}s"
             rec.stop_reason = "watchdog"
 
-    def _request_stop(self, rec: JobRecord, reason: str) -> None:
+    def _request_stop(self, rec: JobRecord, reason: str, now: bool = False) -> None:
         rec.stop_reason = reason
         rec.stop_requested_at = time.time()
-        rec.cache.request_stop()
+        rec.cache.request_stop(now=now)
         self._changed(rec)
 
     def _launch(self, rec: JobRecord) -> None:
@@ -371,6 +406,8 @@ class JobManager:
             rec.error = manifest.get("error") or rec.error or f"worker exited with code {rc}; see worker.log"
         elif rc == 3 or status == "paused":
             rec.state = "paused"
+            if rc == 0 and rec.kind == "stream" and self.settings.fill_gaps:
+                self._queue_gap_filler(rec)
         elif rc is None and status in ("running", "new", None):
             # The worker died with the server down (or crashed): resume offline work automatically.
             rec.state = "queued" if (rec.kind == "offline" and self.settings.auto_resume) else "paused"
@@ -384,6 +421,29 @@ class JobManager:
         rec.stop_requested_at = None
         log.info("job %s -> %s%s", rec.id, rec.state, f" ({rec.error})" if rec.error else "")
         self._changed(rec)
+
+
+    def _queue_gap_filler(self, rec: JobRecord) -> None:
+        """A stream run reached the end of its stretch; fill holes left by seeking at offline priority."""
+        if any(r.video_id == rec.video_id and r.profile_id == rec.profile_id and r.state in ACTIVE
+               for r in self.jobs.values()):
+            return
+        filler = JobRecord(id=uuid.uuid4().hex[:12], video_id=rec.video_id, video_path=rec.video_path,
+                           profile=rec.profile, profile_id=rec.profile_id, cache_dir=rec.cache_dir, kind="offline")
+        self.jobs[filler.id] = filler
+        log.info("queued gap filler %s after stream job %s", filler.id, rec.id)
+        self._changed(filler)
+
+
+def segment_ranges(done: set[int]) -> list[list[int]]:
+    """{0,1,2,5,6} -> [[0, 3], [5, 7]] (half-open)."""
+    ranges: list[list[int]] = []
+    for k in sorted(done):
+        if ranges and ranges[-1][1] == k:
+            ranges[-1][1] = k + 1
+        else:
+            ranges.append([k, k + 1])
+    return ranges
 
 
 def job_view(rec: JobRecord) -> dict:
@@ -401,6 +461,7 @@ def job_view(rec: JobRecord) -> dict:
         from fractions import Fraction
         seg_secs = float(Fraction(manifest["seg_frames"]) / Fraction(manifest["out_fps"]))
         data.update(segments_done=len(done), segments_total=total, contiguous_segments=prefix,
+                    ranges=segment_ranges(done), seg_seconds=seg_secs,
                     contiguous_seconds=round(prefix * seg_secs, 3),
                     duration_seconds=round(manifest["total_out_frames"] / float(Fraction(manifest["out_fps"])), 3),
                     percent=round(100.0 * len(done) / total, 1))

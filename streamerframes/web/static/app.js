@@ -149,7 +149,8 @@
       const hls = new Hls(Object.assign({
         startPosition: 0,            // never jump to the "live" edge of a growing playlist
         maxBufferLength: 60,
-        fragLoadingMaxRetry: 30,     // segments may be long-polled or 503 while generating (Phase 4)
+        fragLoadingTimeOut: 30000,   // a segment that isn't generated yet is long-polled for up to 25 s
+        fragLoadingMaxRetry: 60,     // ...then answered 503 + Retry-After while generation catches up
         fragLoadingRetryDelay: 1000,
         fragLoadingMaxRetryTimeout: 4000,
         manifestLoadingMaxRetry: 10,
@@ -220,10 +221,18 @@
 
     $("status").hidden = false;
     $("s-main").textContent = "Starting generation…";
-    let started = false, finished = false, job = null, frontier = 0, duration = null;
+    let started = false, finished = false, pid = null, status = null;
     const meter = new RateMeter();
 
-    function start(pid) {
+    /** End (seconds) of the generated stretch containing `pos`; `pos` itself if nothing is ready there. */
+    function readyUntil(pos) {
+      if (!status) return pos;
+      const seg = Math.floor(pos / status.seg_seconds + 1e-6);
+      for (const [a, b] of status.ranges) if (a <= seg && seg < b) return Math.min(b * status.seg_seconds, status.duration_seconds);
+      return pos;
+    }
+
+    function start() {
       if (started) return;
       started = true;
       $("play-now").hidden = true;
@@ -234,58 +243,57 @@
     }
 
     video.addEventListener("waiting", () => {
-      if (!finished && job && job.state === "running") $("s-advice").textContent = `Generating… (ready up to ${fmtTime(frontier)})`;
+      if (!finished) $("s-advice").textContent = `Generating from ${fmtTime(video.currentTime)}…`;
     });
-    $("play-now").addEventListener("click", () => job && start(job.profile_id));
-    $("cancel").addEventListener("click", () => job && job.id && api("DELETE", `/api/jobs/${job.id}`).catch(alert));
+    video.addEventListener("seeking", () => meter.samples.length = 0);
+    $("play-now").addEventListener("click", start);
+    $("cancel").addEventListener("click", () => status && status.job && api("DELETE", `/api/jobs/${status.job.id}`).catch(alert));
 
     async function poll() {
       try {
-        job = job && job.id ? await api("GET", `/api/jobs/${job.id}`) : await api("POST", "/api/jobs", { video_id: vid, kind: "stream", profile });
+        if (!pid) {
+          const job = await api("POST", "/api/jobs", { video_id: vid, kind: "stream", profile });
+          pid = job.profile_id;
+        }
+        status = await api("GET", `/api/status/${vid}/${pid}`);
       } catch (e) {
         $("s-main").textContent = `Error: ${e.message}`;
         return setTimeout(poll, 5000);
       }
-      if (job.state === "complete" || job.manifest_status === "complete") {
+      const job = status.job, p = (job && job.progress) || {};
+      if (status.status === "complete") {
         finished = true;
         $("s-main").textContent = "Ready.";
         $("s-detail").textContent = ""; $("s-advice").textContent = ""; $("cancel").hidden = true;
-        start(job.profile_id);
+        start();
         return;
       }
-      if (job.state === "failed") {
-        $("s-main").textContent = `Generation failed: ${job.error || "see worker.log"}`;
-        return;
+      if (status.status === "failed" && !job) {
+        $("s-main").textContent = `Generation failed: ${status.error || "see worker.log"}`;
+        return setTimeout(poll, 5000);
       }
-      if (job.state === "cancelled" || job.state === "paused") {
-        $("s-main").textContent = `Generation ${job.state}.`;
-        $("cancel").hidden = true;
-        return;
-      }
-      frontier = job.contiguous_seconds || 0;
-      duration = job.duration_seconds || duration;
-      meter.add(frontier);
-      const p = job.progress || {};
+      const pos = started ? video.currentTime : 0;
+      const until = readyUntil(pos);
+      meter.add(until);
       const r = meter.rate(p.realtime_ratio || 0);
-      $("cancel").hidden = false;
-      if (job.state === "queued") {
+      $("cancel").hidden = !job;
+      if (!job) {
+        $("s-main").textContent = `Generated ${status.percent}% · paused (playing or seeking resumes it)`;
+      } else if (job.state === "queued") {
         $("s-main").textContent = "Waiting for the GPU…";
       } else {
-        $("s-main").textContent = `Generated ${fmtTime(frontier)} of ${fmtTime(duration)} · ${r.toFixed(2)}× real time` +
-          (p.eta_seconds != null ? ` · done in ${fmtDur(p.eta_seconds)}` : "");
-        $("s-detail").textContent = `${job.contiguous_segments || 0}/${job.segments_total || "?"} segments · source ${p.src_fps_measured ?? "?"} fps`;
+        $("s-main").textContent = `Ready to ${fmtTime(until)} of ${fmtTime(status.duration_seconds)} · ${r.toFixed(2)}× real time` +
+          (job.kind === "offline" ? " (filling gaps)" : "");
+        $("s-detail").textContent = `${status.ranges.reduce((n, [a, b]) => n + b - a, 0)}/${status.segments_total} segments · source ${p.src_fps_measured ?? "?"} fps`;
       }
-      if (duration) {
-        const pos = started ? video.currentTime : 0;
-        const s = safeStart(frontier, duration, pos, r);
-        if (s.ok) $("s-advice").textContent = "Playing now will run without stalling.";
-        else $("s-advice").textContent = isFinite(s.wait)
-          ? `Wait ~${fmtDur(s.wait)} for stall-free playback (or play now).`
-          : "Measuring generation speed…";
-        const ready = (job.contiguous_segments || 0) >= 3;
-        if (!started && ready && s.ok) start(job.profile_id);
-        $("play-now").hidden = started || !ready;
-      }
+      const s = safeStart(until, status.duration_seconds, pos, r);
+      if (s.ok) $("s-advice").textContent = "Playing now will run without stalling.";
+      else if (job) $("s-advice").textContent = isFinite(s.wait)
+        ? `Wait ~${fmtDur(s.wait)} for stall-free playback (or play now).`
+        : "Measuring generation speed…";
+      const ready = until - pos >= 3 * status.seg_seconds - 1e-6;
+      if (!started && ready && s.ok) start();
+      $("play-now").hidden = started || !ready;
       setTimeout(poll, 2000);
     }
     poll();
@@ -300,15 +308,19 @@
     api("GET", `/api/videos/${vid}`).then((v) => { $("title").textContent = v.title; }).catch(() => {});
     left.src = `/media/original/${vid}`;
 
-    let job = null;
+    let pid = null;
     async function poll() {
-      job = job && job.id ? await api("GET", `/api/jobs/${job.id}`) : await api("POST", "/api/jobs", { video_id: vid, kind: "stream", profile });
-      if ((job.contiguous_segments || 0) >= 3 || job.state === "complete") {
-        attachHls(right, `/hls/${vid}/${job.profile_id}/master.m3u8`);
+      if (!pid) pid = (await api("POST", "/api/jobs", { video_id: vid, kind: "stream", profile })).profile_id;
+      const st = await api("GET", `/api/status/${vid}/${pid}`);
+      const first = st.ranges.length && st.ranges[0][0] === 0 ? st.ranges[0][1] : 0;
+      $("fg-fps").textContent = st.out_fps ? `(${fps(st.out_fps)} fps)` : "";
+      if (first >= 3 || st.status === "complete") {
+        $("status").hidden = true;
+        attachHls(right, `/hls/${vid}/${pid}/master.m3u8`);
         return;
       }
       $("status").hidden = false;
-      $("s-main").textContent = `Generating… ${fmtTime(job.contiguous_seconds || 0)} ready`;
+      $("s-main").textContent = `Generating… ${fmtTime(first * st.seg_seconds)} ready`;
       setTimeout(poll, 2000);
     }
     poll().catch((e) => { $("status").hidden = false; $("s-main").textContent = `Error: ${e.message}`; });

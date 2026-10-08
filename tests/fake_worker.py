@@ -31,6 +31,8 @@ def main():
     status, code = "complete", 0
     if mode == "fail":
         status, code = "failed", 1
+    elif mode == "partial":  # a stream run that reached the end of its stretch, leaving holes
+        status, code = "paused", 0
     elif mode in ("slow", "hang"):
         while True:
             if mode == "slow":
