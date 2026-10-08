@@ -14,5 +14,5 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install fastapi httpx pytest ruff numpy psutil
-      - run: ruff check server.py streamerframes tests --select E9,F
+      - run: ruff check server.py streamerframes tests tools --select E9,F
       - run: pytest -q
