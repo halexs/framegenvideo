@@ -156,6 +156,7 @@ def cmd_trt(args) -> int:
     from .engine.rife import RifeEngine
 
     settings = load_settings(args.config)
+    info = crop = None
     if args.input:
         info = probe(args.input)
         width, height = info.width, info.height
@@ -170,15 +171,30 @@ def cmd_trt(args) -> int:
     # Upstream model/warplayer.py builds its grids on CUDA whenever a GPU exists, so the network must run
     # on that device for export too (a CPU export fails with "found at least two devices").
     net = load_ifnet(settings.model_path(args.model), device)
-    ph, pw = RifeEngine(net, height, width, args.scale, "cpu").padded_shape
+    padder = RifeEngine(net, height, width, args.scale, "cpu")
+    ph, pw = padder.padded_shape
     onnx_path = settings.cache_path / "engines" / f"{args.model}_{pw}x{ph}_s{args.scale}.onnx"
 
+    # Check on real frames when a video is given (random noise makes optical flow chaotic, so harmless
+    # CPU-vs-GPU rounding differences would look like large errors).
+    from .engine.rife import smooth_pair
+    pairs = []
+    if info is not None:
+        from .pipeline.samples import sample_frame_pairs
+        pairs = [(padder.pad(a), padder.pad(b)) for a, b in sample_frame_pairs(info, crop, ffmpeg=settings.ffmpeg)]
+    source = f"{len(pairs)} real frame pairs" if pairs else "a synthetic image pair"
+    if not pairs:
+        pairs = [smooth_pair(ph, pw)]
+
     if args.trt_cmd == "export":
+        from .engine.onnx_export import stats_ok
         export_onnx(net, ph, pw, args.scale, onnx_path)
-        err = verify_onnx(net, onnx_path, ph, pw, args.scale)
-        print(f"{onnx_path}\nONNX Runtime vs PyTorch max abs error: {err:.2e} "
-              f"({'ok' if err < 1e-3 else 'TOO HIGH (plan: < 1e-3)'})")
-        return 0 if err < 1e-3 else 1
+        st = verify_onnx(net, onnx_path, ph, pw, args.scale, pairs)
+        ok = stats_ok(st)
+        print(f"{onnx_path}\nONNX Runtime vs PyTorch on {source}: mean abs error {st['mean']:.1e}, "
+              f"99.9th percentile {st['p999']:.1e}, max {st['max']:.1e}, PSNR {st['psnr']:.1f} dB "
+              f"-> {'ok' if ok else 'TOO DIFFERENT (need mean < 1e-3 and 99.9th pct < 4/255)'}")
+        return 0 if ok else 1
 
     from .bench import bench_engine, gpu_name
     from .engine.trt_backend import TrtRifeEngine, build_engine, engine_path
@@ -192,19 +208,20 @@ def cmd_trt(args) -> int:
         return 0
 
     # compare
-    import torch
     torch_engine = RifeEngine(net, height, width, args.scale, device)
     graphs = torch_engine.enable_cuda_graph()
     trt_engine = TrtRifeEngine(net, height, width, args.scale, device, path)
     torch_ms = bench_engine(torch_engine, args.warmup, args.iters)
     trt_ms = bench_engine(trt_engine, args.warmup, args.iters)
-    g = torch.Generator(device="cpu").manual_seed(0)
-    a = torch_engine.pad(torch.rand(1, 3, height, width, generator=g).to(device))
-    b = torch_engine.pad(torch.rand(1, 3, height, width, generator=g).to(device))
-    ref = torch_engine.interpolate(a, b, 0.5).clone()
-    out = trt_engine.interpolate(a, b, 0.5)
-    mse = float(((out - ref) ** 2).mean())
-    psnr = float("inf") if mse == 0 else 10 * torch.log10(torch.tensor(1.0 / mse)).item()
+    from .engine.onnx_export import error_stats
+    psnrs = []
+    for a, b in pairs:
+        a, b = a.to(device), b.to(device)
+        ref = torch_engine.interpolate(a, b, 0.5).clone()
+        out = trt_engine.interpolate(a, b, 0.5)
+        psnrs.append(error_stats(out, ref)["psnr"])
+    psnr = min(psnrs)  # worst pair
+    print(f"PSNR measured on {source}")
     speedup = torch_ms / trt_ms
     go = speedup >= 1.25 and psnr >= 45
     print(f"{width}x{height} scale {args.scale}: PyTorch{' + CUDA graphs' if graphs else ''} {torch_ms:.1f} ms, "
