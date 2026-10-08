@@ -113,4 +113,6 @@ def test_solid_colors_match_ffmpeg_colorspace_filter(space, yuv):
                          input=buf, capture_output=True, check=True).stdout
     conv = YuvConverter(w, h, ColorSpec.from_names(space), "cpu")
     ours = conv.to_rgb(torch.frombuffer(bytearray(buf), dtype=torch.uint8))[0, :, 0, 0] * 255
-    assert all(abs(o - r) <= 1.0 for o, r in zip(ours.tolist(), ref[:3]))
+    # ffmpeg versions round slightly differently (7.1 vs 6.1 disagree by ~1 code value on some colours).
+    # A wrong matrix (BT.601 vs 709) or range is off by 6+, so +-2 still catches real colour bugs.
+    assert all(abs(o - r) <= 2.0 for o, r in zip(ours.tolist(), ref[:3])), (ours.tolist(), list(ref[:3]))
