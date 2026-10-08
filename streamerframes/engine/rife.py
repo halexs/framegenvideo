@@ -15,6 +15,15 @@ class PairKind(enum.Enum):
     DUPLICATE = "dup"    # identical frames: copy, skip inference
 
 
+def graph_matches(graph_out: torch.Tensor, eager_a: torch.Tensor, eager_b: torch.Tensor,
+                  floor: float = 1e-3) -> tuple[bool, float, float]:
+    """Graph output counts as equal to eager if it is as close as two eager runs are to each other
+    (cudnn may pick different kernels run to run), with an absolute floor well below one 8-bit step."""
+    err = float((graph_out - eager_a).abs().max())
+    baseline = float((eager_b - eager_a).abs().max())
+    return err <= max(floor, 2 * baseline), err, baseline
+
+
 def _ssim_matlab():
     # Imported lazily: upstream module needs the repo root on sys.path (the loader adds it).
     from model.pytorch_msssim import ssim_matlab
@@ -47,17 +56,27 @@ class RifeEngine:
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
 
+    def _smooth_pair(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Image-like test inputs: smooth texture and a slightly shifted copy.
+
+        Random noise makes optical flow chaotic, so rounding differences between kernel choices blow up
+        into large output differences; real frames behave like this pair, not like noise.
+        """
+        g = torch.Generator(device="cpu").manual_seed(0)
+        low = torch.rand(1, 3, max(2, self.ph // 32), max(2, self.pw // 32), generator=g)
+        img0 = F.interpolate(low, size=(self.ph, self.pw), mode="bicubic", align_corners=False).clamp(0, 1)
+        img1 = torch.roll(img0, shifts=(3, 5), dims=(2, 3))
+        return img0.to(self.device), img1.to(self.device)
+
     @torch.inference_mode()
-    def enable_cuda_graph(self, tolerance: float = 1e-5) -> bool:
+    def enable_cuda_graph(self) -> bool:
         """Capture the network for the fixed padded shape. Keeps it only if it matches eager output."""
         if self.device.type != "cuda":
             return False
         import logging
         log = logging.getLogger(__name__)
         try:
-            shape = (1, 3, self.ph, self.pw)
-            self._g_in0 = torch.rand(shape, device=self.device)
-            self._g_in1 = torch.rand(shape, device=self.device)
+            self._g_in0, self._g_in1 = self._smooth_pair()
             self._g_t = torch.full((1, 1, 1, 1), 0.5, device=self.device)
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
@@ -68,14 +87,16 @@ class RifeEngine:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 self._g_out = self.run_padded(self._g_in0, self._g_in1, self._g_t)
-            eager = self.run_padded(self._g_in0, self._g_in1, self._g_t).clone()
+            eager_a = self.run_padded(self._g_in0, self._g_in1, self._g_t).clone()
+            eager_b = self.run_padded(self._g_in0, self._g_in1, self._g_t).clone()
             graph.replay()
-            err = float((self._g_out - eager).abs().max())
-            if err > tolerance:
-                log.warning("CUDA graph output differs from eager by %.2e; using eager", err)
+            ok, err, baseline = graph_matches(self._g_out, eager_a, eager_b)
+            if not ok:
+                log.warning("CUDA graph output differs from eager by %.2e (eager vs eager: %.2e); using eager",
+                            err, baseline)
                 return False
             self._graph = graph
-            log.info("CUDA graph captured for %dx%d", self.pw, self.ph)
+            log.info("CUDA graph captured for %dx%d (max diff %.1e)", self.pw, self.ph, err)
             return True
         except Exception as exc:  # noqa: BLE001 - graphs are an optimisation only
             log.warning("CUDA graph capture failed (%s); using eager", exc)
