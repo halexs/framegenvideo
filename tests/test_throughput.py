@@ -158,3 +158,48 @@ def test_bench_cli_writes_calibration(tmp_path):
 
 def test_frame_size_constant():
     assert FRAME == W * H * 3 // 2
+
+
+def test_graph_matches_uses_eager_run_to_run_noise():
+    from streamerframes.engine.rife import graph_matches
+    base = torch.zeros(1, 3, 4, 4)
+    assert graph_matches(base + 5e-4, base, base)[0]              # under the 1e-3 floor
+    assert not graph_matches(base + 0.06, base, base)[0]          # the old failure mode, with stable eager
+    noisy = base.clone()
+    noisy[0, 0, 0, 0] = 0.05                                      # eager itself varies by 0.05...
+    assert graph_matches(base + 0.08, base, noisy)[0]             # ...so 0.08 is within 2x that
+
+
+def test_smooth_pair_is_image_like(env):
+    root, settings = env
+    from streamerframes.engine.loader import load_ifnet
+    from streamerframes.engine.rife import RifeEngine
+    eng = RifeEngine(load_ifnet(settings.model_dir, "cpu"), 100, 200, 1.0, "cpu")
+    a, b = eng._smooth_pair()
+    assert a.shape == (1, 3, 128, 256) and float(a.min()) >= 0 and float(a.max()) <= 1
+    assert float((a[..., 1:, :] - a[..., :-1, :]).abs().mean()) < 0.05  # smooth, unlike noise (~0.33)
+    assert torch.equal(torch.roll(a, (3, 5), (2, 3)), b)
+
+
+def test_progress_speed_ignores_startup(env):
+    root, settings = env
+    from fractions import Fraction as Fr
+
+    from streamerframes.cache.store import ProfileCache
+    from streamerframes.pipeline.generator import Generator
+    from streamerframes.timeline import Timeline
+
+    class Info:  # just what Generator needs to build its manifest
+        src_fps, n_src, width, height, path = Fr(24000, 1001), 10000, 64, 48, "x"
+
+    gen = Generator(Info, settings.profile("realtime"), ProfileCache(root / "c" / "v" / "p"), scale=1.0)
+    tl = Timeline.create(Fr(24000, 1001), Fr(48000, 1001), 10000)
+    seen = []
+    gen.on_progress = seen.append
+    gen._samples = __import__("collections").deque()
+    gen._report(0, tl, 0, 0, 0, started=0.0, now=20.0, cuts=0)    # 20 s of model load, no frames yet
+    gen._report(0, tl, 0, 0, 2, started=0.0, now=22.0, cuts=0)    # first frames appear
+    gen._report(0, tl, 0, 0, 98, started=0.0, now=24.0, cuts=0)   # 48 out fps since then
+    assert seen[0]["eta_seconds"] is None and seen[0]["realtime_ratio"] == 0
+    assert abs(seen[-1]["src_fps_measured"] - 24.0) < 0.1          # not dragged down by the 20 s start-up
+    assert abs(seen[-1]["realtime_ratio"] - 1.0) < 0.01
