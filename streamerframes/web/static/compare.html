@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare · StreamerFrames</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<header>
+  <h1><a href="/">StreamerFrames</a></h1>
+  <span id="title"></span>
+  <span style="flex:1"></span>
+  <button id="toggle">Play / pause both</button>
+</header>
+<main>
+  <div class="grid2">
+    <div><div class="muted">Original</div><video id="left" muted playsinline></video></div>
+    <div><div class="muted">Framegen <span id="fg-fps"></span></div><video id="right" controls playsinline></video></div>
+  </div>
+  <div class="status" id="status" hidden><div class="line" id="s-main"></div></div>
+</main>
+<script src="/static/hls.min.js"></script>
+<script src="/static/app.js"></script>
+<script>SF.comparePage();</script>
+</body>
+</html>

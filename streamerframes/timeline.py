@@ -73,11 +73,21 @@ class Timeline:
         """
         if not 0 <= j < self.total_out_frames:
             raise IndexError(j)
+        return self.position_for(j, self.n_src)
+
+    def position_for(self, j: int, n_src: int) -> tuple[int, Fraction]:
+        """``source_position`` against a frame count only known at decode time (probe counts are estimates)."""
         p = j * self.ratio
-        if p >= self.n_src - 1:
-            return self.n_src - 1, Fraction(0)
+        if p >= n_src - 1:
+            return n_src - 1, Fraction(0)
         i = math.floor(p)
         return i, p - i
+
+    def total_out_frames_for(self, n_src: int) -> int:
+        return math.ceil(n_src * self.out_fps / self.src_fps)
+
+    def with_n_src(self, n_src: int) -> "Timeline":
+        return Timeline(self.src_fps, self.out_fps, n_src, self.seg_frames)
 
     def segment_range(self, k: int) -> tuple[int, int]:
         """Output frames ``[start, end)`` of segment ``k``; the last segment may be short."""

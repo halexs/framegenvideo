@@ -1,0 +1,121 @@
+# StreamerFrames
+
+Raise low-frame-rate video (23.976/24/25/30 fps films) to a higher frame rate with RIFE on a local NVIDIA GPU,
+either offline (render a file) or streamed to a browser while it generates. Built on Practical-RIFE (see
+`README.md`); the design and its rationale are in `PLAN.md`.
+
+## Setup (Windows, GTX 1080 Ti / Pascal)
+
+1. Python 3.11 venv (the launchers expect `..\.framegen`).
+2. Torch with CUDA 12.6 wheels (cu128 and newer dropped Pascal):
+   `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`
+3. `pip install -r requirements-streamerframes.txt`
+4. ffmpeg with `h264_nvenc` on PATH (e.g. the gyan.dev full build).
+5. A RIFE model: put `IFNet_HDv3.py` and `flownet.pkl` in `train_log/` (4.25 recommended; links in `README.md`).
+6. Optional: copy `streamerframes.example.toml` to `streamerframes.toml` and edit paths.
+7. `python -m streamerframes check` must pass.
+
+## Web UI
+
+`start_server.bat` (or `python -m streamerframes serve`) starts the UI on http://localhost:8000.
+
+- **Library:** every video under `movies_roots`, with its generation status and buttons: Original,
+  Framegen (stream now), Generate in background (offline `quality` job), Export, Download, Delete cache.
+- **Framegen** starts a `stream` job and plays the HLS output while it is generated. The status line shows
+  how much is ready, speed (× real time), and whether playing now will run without stalling
+  (lead `B ≥ remaining × (1 − speed)`); otherwise how long to wait. Playback starts by itself once it's safe.
+- **Seeking works anywhere**, even far ahead of what's generated: the playlist lists the whole movie up
+  front, and asking for a segment that doesn't exist yet either waits for it (if it's within ~3 segments of
+  the current run) or restarts generation right there (debounced, so scrubbing doesn't thrash). Holes left
+  behind are filled afterwards by a background job (`fill_gaps`), so the cache still ends up complete.
+- **Compare** shows the original and the framegen version side by side, synced.
+- **One GPU worker at a time.** Streaming outranks offline jobs (offline work pauses after its current
+  segment and resumes afterwards); by default a new stream replaces an older one (`stream_policy`). Jobs
+  survive server restarts: running workers are adopted, interrupted offline jobs resume (`auto_resume`).
+- Host is `127.0.0.1` by default. Set `host = "0.0.0.0"` to use it from other devices; there's no login.
+- Logs: `cache/server.log` (rotated), and per generation `worker.log` / `ffmpeg-*.log` in its cache folder.
+
+Run `python -m streamerframes bench <movie> --crop` once before streaming so `scale=auto` can choose from
+real measurements (without calibration it falls back to: full scale up to 720p, half scale above).
+
+## Models, quality and extras
+
+- **More models:** put each extra model in `models/<name>/` (`IFNet_HDv3.py` + `flownet.pkl`, e.g.
+  `models/4.25.lite/` from the links in `README.md`) and use `model = "<name>"` in a profile, or
+  `model = "auto"`: with calibration (`bench --model all`), it picks the best model and scale that keep up
+  with real time, preferring full models over `lite` ones (override with `model_preference`).
+- **Scene cuts and duplicates:** `scene_ssim` (default 0.2) decides when neighbouring frames are a hard cut;
+  those show the nearer real frame instead of a blend. `dup_mad` (off by default; ~0.002 suits anime drawn on
+  twos) copies duplicated frames instead of interpolating between them.
+- **HEVC export:** `render ... --export-codec hevc`, or the HEVC button in the library, re-encodes the export
+  with `hevc_encoder` (NVENC on Pascal has no HEVC B-frames). Streaming stays H.264 for browsers.
+- **Watch folders:** `watch_dirs = ["E:/Movies/incoming"]` queues an offline `watch_profile` job for each new
+  file once it has finished copying. Files already there when a folder is first watched are left alone.
+
+## TensorRT (experimental, PLAN.md Phase 6)
+
+Off by default. A go/no-go experiment for the 1080 Ti: TensorRT 8.6 is the last version that supports Pascal, and
+only FP32 makes sense there.
+
+```
+pip install onnx onnxruntime onnxscript  (+ the TensorRT 8.6 wheel; see requirements-streamerframes.txt)
+python -m streamerframes trt export  "E:\Movies\Batman Begins.mp4" --crop   # ONNX + check vs PyTorch (< 1e-3)
+python -m streamerframes trt build   "E:\Movies\Batman Begins.mp4" --crop   # FP32 engine in cache/engines/
+python -m streamerframes trt compare "E:\Movies\Batman Begins.mp4" --crop   # speed + PSNR -> GO / NO-GO
+```
+
+GO means at least 1.25× faster than PyTorch + CUDA graphs with PSNR ≥ 45 dB. Only then set
+`backend = "tensorrt"` in a profile. Missing TensorRT or a missing engine for a size falls back to PyTorch with
+a warning. If it's NO-GO, record the numbers below and leave the backend off.
+
+## Command line
+
+```
+python -m streamerframes serve [--host H --port P]   # web UI + job manager
+python -m streamerframes check                      # GPU, torch arch, ffmpeg/NVENC, model files
+python -m streamerframes probe <video>              # stream info as JSON
+python -m streamerframes plan <video> --target-fps 60
+python -m streamerframes bench [<video> --crop | --size 1920x800] [--model all]   # calibrate scale/model=auto
+python -m streamerframes render <video> [--profile quality|realtime] [--target-fps 60 | --multi 2]
+                                [--scale auto|1.0|0.5] [--model NAME|auto] [--export out.mp4 | --no-export]
+                                [--export-codec copy|hevc]
+python -m streamerframes cache ls | rm <video_id|path> | gc [--max-gb N]
+python -m streamerframes trt export|build|compare [<video> --crop | --size WxH] [--scale 1.0]
+```
+
+`render` is resumable: Ctrl+C stops after the current segment, killing it loses at most one segment, and
+running the same command again continues. It exports MP4 (MKV when the source has bitmap subtitles) with the
+source's audio and subtitles copied.
+
+## How it works
+
+- **Exact timing.** Frame rates are fractions (`24000/1001 × 2 = 48000/1001`, `60` → `60000/1001` for NTSC
+  sources). Output frame `j` maps to source position `j × src/out`; integer positions are the source frame
+  byte-for-byte, the rest are RIFE at that `t`. Hard cuts show the nearer source frame instead of a blend.
+- **Segment cache.** Output is fixed-length MPEG-TS segments (about 4 s, a multiple of the frame-rate
+  period so each one starts on a source frame, each starting with an IDR). A segment counts only once ffmpeg
+  lists it in `index/run_*.csv`. A run always starts at the first missing segment, decoding from its exact
+  source frame, so resume and seek are frame-exact and never redo finished work.
+- **Nothing is "complete" unless it is.** Both ffmpeg exit codes, the decoded frame count, and every
+  segment's end time are checked; failures keep the last 50 lines of the ffmpeg log in `manifest.json`.
+- **Throughput.** Reader thread → GPU → writer thread over pinned host buffers; the GPU thread never calls
+  `synchronize()` (the writer waits on a CUDA event per frame). Source frames are uploaded and converted once
+  (YUV420 ↔ RGB on the GPU with the right BT.709/601 matrix). CUDA graphs replay the network for the fixed
+  frame size. Letterboxed films are detected once (`cropdetect` at 8 points) and only the picture is inferred.
+- **Audio** for streaming is a separate AAC HLS rendition encoded alongside the video. The encoder's 1024
+  priming samples are trimmed so audio isn't 21 ms late; a beep/flash test checks sync through the real
+  HLS output, across a resume.
+- **scale=auto.** `bench` records ms/frame per (GPU, model, size, scale, graphs) in `cache/calibration.json`.
+  `realtime` picks the highest-quality scale that sustains 1.1× the needed interpolation rate. The choice is
+  remembered per video, so the cache id never changes under you.
+
+## Measured performance
+
+To be filled in on the 1080 Ti (PLAN.md section 2 has the model-only numbers): `bench` at 1920×800 for
+scale 1.0/0.5 with and without CUDA graphs, and end-to-end `render` src fps for `Batman Begins.mp4`.
+
+## Tests
+
+`pip install pytest httpx fastapi && pytest`. Everything runs on CPU with real ffmpeg and a fake IFNet
+(`tests/fake_model.py`), so CI needs no GPU. GPU-only behaviour (NVENC options, `-hwaccel cuda` seek accuracy,
+CUDA graphs, real-model quality and speed) needs checking on the target machine.

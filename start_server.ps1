@@ -1,4 +1,4 @@
-# PowerShell helper to start the StreamerFrames FastAPI server using the virtualenv Python
+# Start the StreamerFrames web UI and job manager using the virtualenv Python, then open the browser.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $python = Join-Path $scriptDir "..\.framegen\Scripts\python.exe"
 
@@ -7,10 +7,8 @@ if (!(Test-Path $python)) {
     exit 1
 }
 
-# Start uvicorn in a new window so logs are visible
-$arg = "-m uvicorn server:app --host 127.0.0.1 --port 8000 --log-level info"
-Start-Process -FilePath $python -ArgumentList $arg -WindowStyle Normal
+# New window so logs are visible; host/port come from streamerframes.toml (default 127.0.0.1:8000).
+Start-Process -FilePath $python -ArgumentList "-m streamerframes serve" -WorkingDirectory $scriptDir -WindowStyle Normal
 
-# Open the default browser to the web UI
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 3
 Start-Process "http://localhost:8000"
