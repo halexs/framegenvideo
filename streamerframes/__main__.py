@@ -167,7 +167,9 @@ def cmd_trt(args) -> int:
     else:
         width, height = map(int, args.size.lower().split("x"))
     device = args.device
-    net = load_ifnet(settings.model_path(args.model), device if args.trt_cmd != "export" else "cpu")
+    # Upstream model/warplayer.py builds its grids on CUDA whenever a GPU exists, so the network must run
+    # on that device for export too (a CPU export fails with "found at least two devices").
+    net = load_ifnet(settings.model_path(args.model), device)
     ph, pw = RifeEngine(net, height, width, args.scale, "cpu").padded_shape
     onnx_path = settings.cache_path / "engines" / f"{args.model}_{pw}x{ph}_s{args.scale}.onnx"
 
