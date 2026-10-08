@@ -1,0 +1,379 @@
+"""One generation run: fill the first hole of segments in a profile cache (PLAN.md Phase 1)."""
+from __future__ import annotations
+
+import logging
+import math
+import threading
+import time
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
+from typing import Callable
+
+from ..cache.store import ProfileCache
+from ..config import Profile
+from ..probe import VideoInfo
+from ..timeline import (
+    Timeline,
+    out_fps_for_multiplier,
+    out_fps_for_target,
+    scene_cut_frame,
+)
+from . import ffmpeg
+from .procs import FrameReader, FrameWriter, keep_awake
+
+log = logging.getLogger(__name__)
+
+EXIT_OK, EXIT_FAILED, EXIT_PAUSED = 0, 1, 3
+
+
+@dataclass
+class RunResult:
+    status: str                 # complete | partial | paused | failed | noop
+    run_id: int | None = None
+    first_segment: int | None = None
+    frames_written: int = 0
+    error: str | None = None
+
+    @property
+    def exit_code(self) -> int:
+        return {"failed": EXIT_FAILED, "paused": EXIT_PAUSED}.get(self.status, EXIT_OK)
+
+
+def out_fps_for_profile(src_fps: Fraction, profile: Profile) -> Fraction:
+    if profile.mode == "target":
+        return out_fps_for_target(src_fps, int(profile.target_fps))
+    return out_fps_for_multiplier(src_fps, Fraction(profile.multi))
+
+
+def resolve_scale(profile: Profile, width: int, height: int, settings=None, model: str = "default") -> float:
+    """Phase 1 heuristic for scale=auto: full scale up to 720p, half above. Phase 2 uses calibration."""
+    if profile.scale != "auto":
+        return float(profile.scale)
+    return 1.0 if width * height <= 1280 * 720 else 0.5
+
+
+def _rate_str(f: Fraction) -> str:
+    return f"{f.numerator}/{f.denominator}"
+
+
+def frame_tolerance(n: int) -> int:
+    """How far the decoded frame count may fall short of the probe estimate before we call it a failure."""
+    return max(3, n // 500)
+
+
+def default_engine_factory(info: VideoInfo, profile: Profile, model_dir: Path, scale: float, device: str):
+    def build():
+        from ..engine.color import ColorSpec, YuvConverter
+        from ..engine.loader import load_ifnet
+        from ..engine.rife import RifeEngine
+
+        net = load_ifnet(model_dir, device)
+        engine = RifeEngine(net, info.height, info.width, scale, device,
+                            scene_ssim=profile.scene_ssim, dup_mad=profile.dup_mad)
+        conv = YuvConverter(info.width, info.height,
+                            ColorSpec.from_names(info.color_space, info.color_range, info.height), device)
+        return engine, conv
+    return build
+
+
+class Generator:
+    def __init__(self, info: VideoInfo, profile: Profile, cache: ProfileCache, *, scale: float,
+                 model_dir: Path | None = None, device: str = "cuda", hwaccel: bool = True,
+                 engine_factory: Callable | None = None, stop_event: threading.Event | None = None,
+                 progress_interval: float = 2.0, on_progress: Callable[[dict], None] | None = None):
+        self.info = info
+        self.profile = profile
+        self.cache = cache
+        self.scale = scale
+        self.device = device
+        self.hwaccel = hwaccel
+        self.engine_factory = engine_factory or default_engine_factory(info, profile, model_dir, scale, device)
+        self.stop_event = stop_event or threading.Event()
+        self.progress_interval = progress_interval
+        self.on_progress = on_progress
+        self._engine = None
+        self._conv = None
+        self.manifest = self._load_or_create_manifest()
+
+    # Manifest
+    def _base_timeline(self) -> Timeline:
+        out_fps = out_fps_for_profile(self.info.src_fps, self.profile)
+        return Timeline.create(self.info.src_fps, out_fps, self.info.n_src, Fraction(self.profile.seg_seconds))
+
+    def _load_or_create_manifest(self) -> dict:
+        tl = self._base_timeline()
+        m = self.cache.manifest()
+        if m:
+            if m.get("seg_frames") != tl.seg_frames or m.get("out_fps") != _rate_str(tl.out_fps):
+                raise RuntimeError(f"{self.cache.manifest_path} does not match this profile; delete the cache")
+            return m
+        self.cache.ensure_dirs()
+        m = {
+            "version": 1,
+            "video_id": self.cache.video_id,
+            "profile_id": self.cache.profile_id,
+            "profile_name": self.profile.name,
+            "profile": self.profile.pixel_settings(),
+            "scale": self.scale,
+            "source": self.info.path,
+            "width": self.info.width,
+            "height": self.info.height,
+            "src_fps": _rate_str(tl.src_fps),
+            "out_fps": _rate_str(tl.out_fps),
+            "n_src": tl.n_src,
+            "n_src_actual": None,
+            "seg_frames": tl.seg_frames,
+            "total_segments": tl.total_segments,
+            "total_out_frames": tl.total_out_frames,
+            "last_segment_frames": tl.total_out_frames - (tl.total_segments - 1) * tl.seg_frames,
+            "status": "new",
+            "error": None,
+            "error_tail": None,
+            "created_at": time.time(),
+        }
+        self.cache.write_manifest(m)
+        return m
+
+    def timeline(self) -> Timeline:
+        base = self._base_timeline()
+        return base.with_n_src(self.manifest.get("n_src_actual") or self.manifest["n_src"])
+
+    def _set_frame_count(self, n_actual: int) -> Timeline:
+        tl = self.timeline().with_n_src(n_actual)
+        self.manifest.update(
+            n_src_actual=n_actual, total_out_frames=tl.total_out_frames, total_segments=tl.total_segments,
+            last_segment_frames=tl.total_out_frames - (tl.total_segments - 1) * tl.seg_frames)
+        self.cache.write_manifest(self.manifest)
+        return tl
+
+    def _finish(self, status: str, error: str | None = None, tail: list[str] | None = None):
+        self.manifest.update(status=status, error=error, error_tail=tail)
+        self.cache.write_manifest(self.manifest)
+
+    def verify_complete(self, tl: Timeline) -> str | None:
+        """None if every segment exists and durations add up; else the reason it isn't complete."""
+        rows = self.cache.index_rows()
+        missing = [k for k in range(tl.total_segments) if k not in rows]
+        if missing:
+            return f"{len(missing)} segments missing (first {missing[0]})"
+        if self.manifest.get("n_src_actual") is None:
+            return "final frame count unknown (end of stream never decoded)"
+        # The muxer logs each segment's end on the output timeline (the first start of a run reads 0, so
+        # starts are unreliable). Every segment must end exactly on its frame boundary.
+        frame = 1 / float(tl.out_fps)
+        for k in range(tl.total_segments):
+            expected_end = float(tl.segment_range(k)[1] / tl.out_fps)
+            if abs(rows[k][1] - expected_end) > 1.5 * frame:
+                return f"segment {k} ends at {rows[k][1]:.3f}s, expected {expected_end:.3f}s"
+        return None
+
+    # Engine
+    def _engine_pair(self):
+        if self._engine is None:
+            self._engine, self._conv = self.engine_factory()
+        return self._engine, self._conv
+
+    def _stop(self) -> bool:
+        return self.stop_event.is_set() or self.cache.stop_requested()
+
+    # Run
+    def run(self, start_segment: int = 0) -> RunResult:
+        tl = self.timeline()
+        completed = self.cache.completed_segments()
+        k0 = self.cache.first_missing(completed, start_segment, tl.total_segments)
+        if k0 is None:
+            reason = self.verify_complete(tl)
+            self._finish("complete" if reason is None else "failed", reason)
+            return RunResult("complete" if reason is None else "failed", error=reason)
+        end = self.cache.gap_end(completed, k0, tl.total_segments)
+        run_id = self.cache.next_run_id()
+        self.cache.acquire_lock(run_id)
+        self.cache.clear_stop()
+        self.manifest.update(status="running", error=None, error_tail=None)
+        self.cache.write_manifest(self.manifest)
+        keep_awake(True)
+        log.info("run %d: segments [%d, %d) of %d, source frame %d", run_id, k0, end, tl.total_segments,
+                 tl.segment_start_source_frame(k0))
+        try:
+            return self._run(tl, k0, end, run_id)
+        except Exception as exc:  # noqa: BLE001 - recorded in the manifest, then re-raised
+            log.exception("run %d crashed", run_id)
+            self._finish("failed", f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            keep_awake(False)
+            self.cache.clear_stop()
+            self.cache.release_lock()
+
+    def _run(self, tl: Timeline, k0: int, end: int, run_id: int) -> RunResult:
+        info, n = self.info, tl.seg_frames
+        root = self.cache.root
+        s0 = tl.segment_start_source_frame(k0)
+        frame_size = ffmpeg_frame_size(info)
+        decoder = FrameReader(ffmpeg.decoder_cmd(info, s0, self.hwaccel), root / "ffmpeg-decode.log", frame_size)
+        enc = self.profile.encoder
+        encoder = FrameWriter(
+            ffmpeg.encoder_cmd(info, tl, k0, run_id, root,
+                               encoder="lossless" if enc.codec == "lossless" else "nvenc",
+                               preset=enc.preset, cq=enc.cq, maxrate=enc.maxrate),
+            root / "ffmpeg-encode.log")
+
+        frames: dict[int, bytes] = {}
+        rgb: dict[int, object] = {}
+        kinds: dict[int, object] = {}
+        next_idx = s0
+        n_actual: int | None = None
+        j = j_start = k0 * n
+        j_end = end * n if end < tl.total_segments else None
+        stopped = False
+        cuts = 0
+        started = last_report = time.monotonic()
+
+        def ensure(idx: int) -> None:
+            nonlocal next_idx, n_actual
+            while next_idx <= idx and n_actual is None:
+                data = decoder.read()
+                if data is None:
+                    n_actual = next_idx
+                    return
+                frames[next_idx] = data
+                next_idx += 1
+
+        def to_rgb(idx: int):
+            if idx not in rgb:
+                import torch
+                engine, conv = self._engine_pair()
+                buf = torch.frombuffer(bytearray(frames[idx]), dtype=torch.uint8).to(conv.device)
+                rgb[idx] = engine.pad(conv.to_rgb(buf))
+            return rgb[idx]
+
+        def pair_kind(i: int):
+            from ..engine.rife import PairKind
+            if not (self.profile.scene_detect or self.profile.dup_mad > 0):
+                return PairKind.NORMAL
+            if i not in kinds:
+                engine, _ = self._engine_pair()
+                kinds[i] = engine.classify_pair(to_rgb(i), to_rgb(i + 1), check_cut=self.profile.scene_detect)
+                if kinds[i] is PairKind.CUT:
+                    log.info("scene cut after source frame %d (%.3fs)", i, float(i / tl.src_fps))
+            return kinds[i]
+
+        try:
+            while j_end is None or j < j_end:
+                if j > j_start and j % n == 0 and self._stop():
+                    stopped = True
+                    break
+                p = j * tl.ratio
+                i = math.floor(p)
+                t = p - i
+                ensure(i + 1 if t else i)
+                if n_actual is not None:
+                    if n_actual <= s0:
+                        raise RuntimeError(f"decoder produced no frames from source frame {s0}")
+                    if j >= tl.total_out_frames_for(n_actual):
+                        break
+                    if p >= n_actual - 1:
+                        i, t = n_actual - 1, Fraction(0)
+                if t == 0:
+                    out = frames[i]
+                else:
+                    from ..engine.rife import PairKind
+                    kind = pair_kind(i)
+                    if kind is PairKind.DUPLICATE:
+                        out = frames[i]
+                    elif kind is PairKind.CUT:
+                        out = frames[scene_cut_frame(i, t)]
+                        cuts += 1
+                    else:
+                        engine, conv = self._engine_pair()
+                        mid = engine.interpolate(to_rgb(i), to_rgb(i + 1), float(t))
+                        out = conv.from_rgb(mid).cpu().numpy()
+                encoder.write(out)
+                for old in [x for x in frames if x < i]:
+                    frames.pop(old)
+                    rgb.pop(old, None)
+                    kinds.pop(old, None)
+                j += 1
+                now = time.monotonic()
+                if now - last_report >= self.progress_interval:
+                    last_report = now
+                    self._report(run_id, tl, k0, j_start, j, started, now, cuts)
+        except BrokenPipeError:
+            pass  # encoder died; its exit code and log tail are reported below
+
+        enc_rc = encoder.close()
+        dec_rc = decoder.close()
+        written = j - j_start
+        self._report(run_id, tl, k0, j_start, j, started, time.monotonic(), cuts)
+
+        if enc_rc != 0:
+            return self._fail(run_id, k0, written, f"encoder exited with code {enc_rc}", encoder.tail())
+        if decoder.eof and dec_rc != 0:
+            return self._fail(run_id, k0, written, f"decoder exited with code {dec_rc}", decoder.tail())
+        if n_actual is not None:
+            expected = self.manifest["n_src"]
+            if n_actual < expected - frame_tolerance(expected):
+                return self._fail(run_id, k0, written,
+                                  f"decoder delivered {n_actual} of ~{expected} source frames", decoder.tail())
+            if n_actual != expected:
+                log.info("source has %d frames (probe estimated %d)", n_actual, expected)
+            tl = self._set_frame_count(n_actual)
+
+        if stopped:
+            self._finish("paused")
+            return RunResult("paused", run_id, k0, written)
+        if self.cache.first_missing(self.cache.completed_segments(), 0, tl.total_segments) is None:
+            reason = self.verify_complete(tl)
+            if reason:
+                return self._fail(run_id, k0, written, reason)
+            self._finish("complete")
+            return RunResult("complete", run_id, k0, written)
+        self._finish("paused")
+        return RunResult("partial", run_id, k0, written)
+
+    def _fail(self, run_id, k0, written, error, tail=None) -> RunResult:
+        log.error("run %d failed: %s", run_id, error)
+        self._finish("failed", error, tail)
+        return RunResult("failed", run_id, k0, written, error)
+
+    def _report(self, run_id, tl, k0, j_start, j, started, now, cuts) -> None:
+        elapsed = max(now - started, 1e-6)
+        done = j - j_start
+        video_secs = done / tl.out_fps
+        ratio = float(video_secs) / elapsed
+        remaining = max(tl.total_out_frames - j, 0)
+        rate = done / elapsed
+        data = {
+            "run": run_id,
+            "start_segment": k0,
+            "segment_frontier": j // tl.seg_frames,
+            "out_frame": j,
+            "out_frames_done": done,
+            "total_out_frames": tl.total_out_frames,
+            "src_fps_measured": round(float(rate * tl.ratio), 3),
+            "realtime_ratio": round(ratio, 4),
+            "eta_seconds": round(remaining / rate, 1) if rate > 0 else None,
+            "scene_cuts": cuts,
+            "started_at": time.time() - elapsed,
+        }
+        gpu = _gpu_mem_mb(self.device)
+        if gpu is not None:
+            data["gpu_mem_mb"] = gpu
+        self.cache.write_progress(data)
+        if self.on_progress:
+            self.on_progress(data)
+
+
+def ffmpeg_frame_size(info: VideoInfo) -> int:
+    return ffmpeg.frame_bytes(info.width, info.height)
+
+
+def _gpu_mem_mb(device: str) -> int | None:
+    if not str(device).startswith("cuda"):
+        return None
+    try:
+        import torch
+        return int(torch.cuda.memory_allocated() / 2**20)
+    except Exception:  # noqa: BLE001
+        return None

@@ -18,8 +18,7 @@ _MATRICES = {
 }
 
 
-def frame_bytes(width: int, height: int) -> int:
-    return width * height + 2 * ((width + 1) // 2) * ((height + 1) // 2)
+from ..pipeline.ffmpeg import frame_bytes  # noqa: E402,F401  (re-exported)
 
 
 @dataclass(frozen=True)

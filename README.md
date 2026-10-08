@@ -10,7 +10,10 @@ put the RIFE model files in `train_log/`, then run `start_server.bat` (serves ht
 Set `MOVIES_DIR` (default `E:/Movies`), `HLS_DIR`, and for `rife_server.py` `HOST`/`PORT` to override paths.
 The new `streamerframes/` package (in progress, see `PLAN.md`) has a CLI: `python -m streamerframes probe <video>` and
 `python -m streamerframes plan <video> --target-fps 60` (output fps, frame count, segment layout), and
-`python -m streamerframes check` (GPU, torch arch, ffmpeg/NVENC, model files).
+`python -m streamerframes check` (GPU, torch arch, ffmpeg/NVENC, model files),
+`python -m streamerframes render <video> [--profile quality|realtime] [--target-fps 60 | --multi 2]` (resumable;
+Ctrl+C pauses, rerun to continue; exports MP4/MKV with the source audio and subtitles), and
+`python -m streamerframes cache {ls,rm,gc}`.
 Configuration: copy `streamerframes.example.toml` to `streamerframes.toml`.
 Run tests with `pip install pytest fastapi httpx && pytest`.
 The server binds to localhost by default; change `--host` in the start scripts only if you trust your network.

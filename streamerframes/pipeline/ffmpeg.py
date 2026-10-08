@@ -1,6 +1,7 @@
 """Pure ffmpeg command builders (PLAN.md Phase 1). Each returns a list[str] for subprocess."""
 from __future__ import annotations
 
+import re
 from fractions import Fraction
 from pathlib import Path
 
@@ -8,6 +9,11 @@ from ..probe import VideoInfo
 from ..timeline import Timeline
 
 BASE = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "warning"]
+
+
+def frame_bytes(width: int, height: int) -> int:
+    """Size of one packed yuv420p frame (chroma planes round up for odd sizes)."""
+    return width * height + 2 * ((width + 1) // 2) * ((height + 1) // 2)
 
 
 def rate(value: Fraction) -> str:
@@ -44,18 +50,27 @@ def decoder_cmd(info: VideoInfo, start_frame: int = 0, hwaccel: bool = True) -> 
     return cmd
 
 
+def _double_rate(maxrate: str) -> str:
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgG]?)", maxrate.strip())
+    if not m:
+        raise ValueError(f"bad bitrate {maxrate!r}")
+    value = float(m.group(1)) * 2
+    return f"{value:g}{m.group(2)}"
+
+
 def encoder_cmd(info: VideoInfo, tl: Timeline, start_segment: int, run_id: int, out_dir: Path,
-                encoder: str = "nvenc", preset: str = "p4", cq: int = 20) -> list[str]:
+                encoder: str = "nvenc", preset: str = "p4", cq: int = 20, maxrate: str = "25M",
+                width: int | None = None, height: int | None = None) -> list[str]:
     """Raw yuv420p on stdin -> fixed-length MPEG-TS segments, each starting with an IDR frame."""
     n = tl.seg_frames
     cmd = list(BASE) + [
-        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{info.width}x{info.height}",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width or info.width}x{height or info.height}",
         "-framerate", rate(tl.out_fps), "-i", "pipe:0", "-an",
     ]
     if encoder == "nvenc":
         cmd += [
             "-c:v", "h264_nvenc", "-preset", preset, "-tune", "hq", "-profile:v", "high",
-            "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-maxrate", "25M", "-bufsize", "50M",
+            "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-maxrate", maxrate, "-bufsize", _double_rate(maxrate),
             "-g", str(n), "-forced-idr", "1", "-no-scenecut", "1", "-strict_gop", "1",
             "-spatial-aq", "1",
         ]
