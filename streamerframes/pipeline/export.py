@@ -16,10 +16,11 @@ from .procs import FfmpegProcess
 log = logging.getLogger(__name__)
 
 
-def default_export_name(info: VideoInfo, manifest: dict, container: str) -> str:
+def default_export_name(info: VideoInfo, manifest: dict, container: str, video_codec: str = "copy") -> str:
     stem = re.sub(r"[^\w.\- ]+", "_", Path(info.path).stem).strip() or "video"
     fps = Fraction(manifest["out_fps"])
-    return f"{stem}.{float(fps):.3f}fps.{container}".replace(".000fps", "fps")
+    tag = ".hevc" if video_codec == "hevc" else ""
+    return f"{stem}.{float(fps):.3f}fps{tag}.{container}".replace(".000fps", "fps")
 
 
 def video_duration(path: Path, ffprobe: str = "ffprobe") -> float:
@@ -39,20 +40,21 @@ def video_duration(path: Path, ffprobe: str = "ffprobe") -> float:
 
 
 def export(cache: ProfileCache, info: VideoInfo, output: Path | None = None, container: str = "auto",
-           export_dir: Path | None = None) -> Path:
+           export_dir: Path | None = None, video_codec: str = "copy", hevc_encoder: str = "hevc_nvenc") -> Path:
     manifest = cache.manifest() or {}
     if manifest.get("status") != "complete":
         raise RuntimeError(f"cache is {manifest.get('status', 'missing')}, not complete")
     container = ffmpeg.export_container(info, container)
     if output is None:
         out_dir = Path(export_dir) if export_dir else cache.export_dir
-        output = out_dir / default_export_name(info, manifest, container)
+        output = out_dir / default_export_name(info, manifest, container, video_codec)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     segments = [cache.segment_path(k) for k in range(manifest["total_segments"])]
     concat = ffmpeg.write_concat_list(segments, cache.root / "segments.txt")
     tmp = output.with_name(output.stem + ".partial" + output.suffix)
-    proc = FfmpegProcess(ffmpeg.finalize_cmd(info, concat, tmp), cache.root / "ffmpeg-export.log")
+    proc = FfmpegProcess(ffmpeg.finalize_cmd(info, concat, tmp, video_codec, hevc_encoder),
+                         cache.root / "ffmpeg-export.log")
     rc = proc.wait()
     if rc != 0:
         tmp.unlink(missing_ok=True)

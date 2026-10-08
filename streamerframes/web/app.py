@@ -99,13 +99,18 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
     manager = manager or JobManager(settings, config_path=config_path)
     exports_running: set[str] = set()
 
+    from ..jobs.watcher import FolderWatcher
+    watcher = FolderWatcher(settings, manager.submit)
+
     @asynccontextmanager
     async def lifespan(_app):
         if start_manager:
             manager.start()
+            watcher.start()
         try:
             yield
         finally:
+            watcher.stop()
             manager.shutdown()
 
     app = FastAPI(title="StreamerFrames", lifespan=lifespan)
@@ -252,11 +257,16 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
             return cache_summary(pc)
         path = library.path(video_id)
 
+        codec = body.get("codec", "copy")
+        if codec not in ("copy", "hevc"):
+            raise HTTPException(400, "codec must be 'copy' or 'hevc'")
+
         def run():
             from ..pipeline.export import export
             try:
                 info = probe(path, settings.ffprobe)
-                export(pc, info, export_dir=Path(settings.export_dir) if settings.export_dir else None)
+                export(pc, info, export_dir=Path(settings.export_dir) if settings.export_dir else None,
+                       video_codec=codec, hevc_encoder=settings.hevc_encoder)
                 pc.update_manifest(export_state="done", export_error=None)
             except Exception as exc:  # noqa: BLE001 - shown in the UI
                 log.exception("export failed")

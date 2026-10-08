@@ -121,7 +121,7 @@ def test_auto_scale_is_sticky_per_video(env, tmp_path):
     first = resolve(settings, job)
     assert first[3] == 1.0  # no calibration, small frame -> heuristic
     store = CacheStore(settings.cache_root)
-    assert store.source(first[1])["auto_scale"] == {"realtime": 1.0}
+    assert store.source(first[1])["auto_choice"] == {"realtime": {"model": "default", "scale": 1.0}}
     # New calibration says 1.0 is too slow, but the existing choice (and cache) is kept.
     (root / "cache" / "calibration.json").write_text(json.dumps({"entries": {
         entry_key("cpu", "default", W, 32, 1.0, True): {"ms": 1000.0},

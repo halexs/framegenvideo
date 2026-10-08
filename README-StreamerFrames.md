@@ -38,6 +38,20 @@ either offline (render a file) or streamed to a browser while it generates. Buil
 Run `python -m streamerframes bench <movie> --crop` once before streaming so `scale=auto` can choose from
 real measurements (without calibration it falls back to: full scale up to 720p, half scale above).
 
+## Models, quality and extras
+
+- **More models:** put each extra model in `models/<name>/` (`IFNet_HDv3.py` + `flownet.pkl`, e.g.
+  `models/4.25.lite/` from the links in `README.md`) and use `model = "<name>"` in a profile, or
+  `model = "auto"`: with calibration (`bench --model all`), it picks the best model and scale that keep up
+  with real time, preferring full models over `lite` ones (override with `model_preference`).
+- **Scene cuts and duplicates:** `scene_ssim` (default 0.2) decides when neighbouring frames are a hard cut;
+  those show the nearer real frame instead of a blend. `dup_mad` (off by default; ~0.002 suits anime drawn on
+  twos) copies duplicated frames instead of interpolating between them.
+- **HEVC export:** `render ... --export-codec hevc`, or the HEVC button in the library, re-encodes the export
+  with `hevc_encoder` (NVENC on Pascal has no HEVC B-frames). Streaming stays H.264 for browsers.
+- **Watch folders:** `watch_dirs = ["E:/Movies/incoming"]` queues an offline `watch_profile` job for each new
+  file once it has finished copying. Files already there when a folder is first watched are left alone.
+
 ## Command line
 
 ```
@@ -45,9 +59,10 @@ python -m streamerframes serve [--host H --port P]   # web UI + job manager
 python -m streamerframes check                      # GPU, torch arch, ffmpeg/NVENC, model files
 python -m streamerframes probe <video>              # stream info as JSON
 python -m streamerframes plan <video> --target-fps 60
-python -m streamerframes bench [<video> --crop | --size 1920x800]   # calibrate scale=auto
+python -m streamerframes bench [<video> --crop | --size 1920x800] [--model all]   # calibrate scale/model=auto
 python -m streamerframes render <video> [--profile quality|realtime] [--target-fps 60 | --multi 2]
-                                [--scale auto|1.0|0.5] [--export out.mp4 | --no-export]
+                                [--scale auto|1.0|0.5] [--model NAME|auto] [--export out.mp4 | --no-export]
+                                [--export-codec copy|hevc]
 python -m streamerframes cache ls | rm <video_id|path> | gc [--max-gb N]
 ```
 

@@ -104,9 +104,12 @@
           onclick: () => api("POST", "/api/jobs", { video_id: v.video_id, kind: "offline", profile: "quality" }).then(load, alert),
         }));
         for (const c of v.caches) {
-          if (c.status === "complete" && !c.has_export && c.export_state !== "running")
-            actions.append(el("button", { text: `Export ${c.profile_name || ""}`,
+          if (c.status === "complete" && !c.has_export && c.export_state !== "running") {
+            actions.append(el("button", { text: `Export ${c.profile_name || ""}`, title: "MP4/MKV with the source audio and subtitles",
               onclick: () => api("POST", `/api/videos/${v.video_id}/export`, { profile_id: c.profile_id }).then(load, alert) }));
+            actions.append(el("button", { text: "HEVC", title: "Export re-encoded to HEVC (smaller file, takes longer)",
+              onclick: () => api("POST", `/api/videos/${v.video_id}/export`, { profile_id: c.profile_id, codec: "hevc" }).then(load, alert) }));
+          }
           if (c.has_export)
             actions.append(el("a", { class: "btn", href: `/exports/${v.video_id}/${c.profile_id}`, text: `Download ${c.profile_name || ""}` }));
         }

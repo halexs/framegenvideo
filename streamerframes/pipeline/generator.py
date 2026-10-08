@@ -53,20 +53,6 @@ def interps_per_second(src_fps: Fraction, out_fps: Fraction) -> float:
     return float(out_fps - src_fps)
 
 
-def resolve_scale(profile: Profile, width: int, height: int, calibration: dict | None = None,
-                  out_fps: Fraction | None = None, src_fps: Fraction | None = None) -> float:
-    """scale=auto: pick from benchmark calibration when available, else full scale up to 720p."""
-    if profile.scale != "auto":
-        return float(profile.scale)
-    if calibration and out_fps and src_fps:
-        from ..bench import choose_scale
-        chosen = choose_scale(calibration, profile.model, width, height,
-                              interps_per_second(src_fps, out_fps), profile.cuda_graphs)
-        if chosen:
-            return chosen
-    return 1.0 if width * height <= 1280 * 720 else 0.5
-
-
 def _rate_str(f: Fraction) -> str:
     return f"{f.numerator}/{f.denominator}"
 

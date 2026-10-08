@@ -62,7 +62,8 @@ def cmd_render(args) -> int:
         overrides["encoder"] = {"codec": "lossless" if args.encoder == "lossless" else "h264_nvenc"}
     job = Job(video_path=str(Path(args.input).resolve()), profile=args.profile, overrides=overrides or None,
               start_segment=args.start_segment, export=not args.no_export, export_path=args.export,
-              container=args.container, device=args.device, hwaccel=not args.no_hwaccel, config=args.config)
+              container=args.container, export_codec=args.export_codec, device=args.device,
+              hwaccel=not args.no_hwaccel, config=args.config)
 
     if not args.skip_check:
         checks = run_checks(settings, (overrides.get("model") or settings.profile(args.profile).model),
@@ -135,8 +136,13 @@ def cmd_bench(args) -> int:
     else:
         width, height = map(int, args.size.lower().split("x"))
     scales = [float(s) for s in args.scales.split(",")]
-    results = run_bench(settings.model_path(args.model), args.model, width, height, args.device, scales,
-                        warmup=args.warmup, iters=args.iters)
+    models = settings.available_models() if args.model in ("all", "auto") else [args.model]
+    if not models:
+        raise RuntimeError("no usable models found (see `check`)")
+    results = {}
+    for model in models:
+        results.update(run_bench(settings.model_path(model), model, width, height, args.device, scales,
+                                 warmup=args.warmup, iters=args.iters))
     save_entries(settings.cache_root, results)
     for key, value in results.items():
         print(f"{key}: {value['ms']:.2f} ms/frame ({1000 / value['ms']:.1f} interpolations/s)")
@@ -215,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--export", help="output path (default: inside the cache or export_dir)")
     p.add_argument("--no-export", action="store_true")
     p.add_argument("--container", default="auto", choices=["auto", "mp4", "mkv"])
+    p.add_argument("--export-codec", default="copy", choices=["copy", "hevc"],
+                   help="hevc re-encodes the export (hevc_encoder in config) for a smaller file")
     p.add_argument("--start-segment", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--no-hwaccel", action="store_true", help="decode on the CPU")
@@ -224,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("input", nargs="?", help="video to take the resolution from")
     p.add_argument("--size", default="1920x800", help="WxH when no input is given")
     p.add_argument("--crop", action="store_true", help="benchmark the letterbox-cropped size")
-    p.add_argument("--model", default="default")
+    p.add_argument("--model", default="all", help="a model name, or 'all' installed models")
     p.add_argument("--scales", default="1.0,0.5")
     p.add_argument("--device", default="cuda")
     p.add_argument("--warmup", type=int, default=5)
