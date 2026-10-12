@@ -15,6 +15,19 @@ class PairKind(enum.Enum):
     DUPLICATE = "dup"    # identical frames: copy, skip inference
 
 
+def smooth_pair(height: int, width: int, device="cpu") -> tuple[torch.Tensor, torch.Tensor]:
+    """Image-like test inputs: a smooth texture and a slightly shifted copy.
+
+    Random noise makes optical flow chaotic, so harmless rounding differences (kernel choice, CPU vs GPU)
+    blow up into large output differences. Real frames behave like this pair, not like noise.
+    """
+    g = torch.Generator(device="cpu").manual_seed(0)
+    low = torch.rand(1, 3, max(2, height // 32), max(2, width // 32), generator=g)
+    img0 = F.interpolate(low, size=(height, width), mode="bicubic", align_corners=False).clamp(0, 1)
+    img1 = torch.roll(img0, shifts=(3, 5), dims=(2, 3))
+    return img0.to(device), img1.to(device)
+
+
 def graph_matches(graph_out: torch.Tensor, eager_a: torch.Tensor, eager_b: torch.Tensor,
                   floor: float = 1e-3) -> tuple[bool, float, float]:
     """Graph output counts as equal to eager if it is as close as two eager runs are to each other
@@ -57,16 +70,7 @@ class RifeEngine:
             torch.backends.cudnn.benchmark = True
 
     def _smooth_pair(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Image-like test inputs: smooth texture and a slightly shifted copy.
-
-        Random noise makes optical flow chaotic, so rounding differences between kernel choices blow up
-        into large output differences; real frames behave like this pair, not like noise.
-        """
-        g = torch.Generator(device="cpu").manual_seed(0)
-        low = torch.rand(1, 3, max(2, self.ph // 32), max(2, self.pw // 32), generator=g)
-        img0 = F.interpolate(low, size=(self.ph, self.pw), mode="bicubic", align_corners=False).clamp(0, 1)
-        img1 = torch.roll(img0, shifts=(3, 5), dims=(2, 3))
-        return img0.to(self.device), img1.to(self.device)
+        return smooth_pair(self.ph, self.pw, self.device)
 
     @torch.inference_mode()
     def enable_cuda_graph(self) -> bool:

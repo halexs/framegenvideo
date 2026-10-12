@@ -147,3 +147,13 @@ def test_seek_retargets_generation_and_gaps_get_filled(tmp_path, monkeypatch):
         assert st["status"] == "complete" and st["ranges"] == [[0, 30]]
         kinds = sorted(j.kind for j in manager.jobs.values())
         assert kinds == ["offline", "stream"]
+
+
+def test_media_fetch_marks_playback(web):
+    movies, settings, manager, client = web
+    make_movie(movies / "Awake.mp4", frames=12)
+    vid = client.get("/api/library").json()["videos"][0]["video_id"]
+    awake = client.app.state.playback_awake
+    assert awake._last is None  # library and page loads don't count
+    assert client.get(f"/media/original/{vid}").status_code == 200
+    assert awake._last is not None
