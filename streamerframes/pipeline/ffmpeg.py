@@ -74,6 +74,9 @@ def encoder_cmd(info: VideoInfo, tl: Timeline, start_segment: int, run_id: int, 
             "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-maxrate", maxrate, "-bufsize", _double_rate(maxrate),
             "-g", str(n), "-forced-idr", "1", "-no-scenecut", "1", "-strict_gop", "1",
             "-spatial-aq", "1",
+            # No B-frames: their reorder delay shifts every PTS (~3 frames), so segment ends miss their
+            # frame boundaries and video lags the audio rendition.
+            "-bf", "0",
         ]
     elif encoder == "lossless":
         cmd += ["-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p", "-g", str(n),

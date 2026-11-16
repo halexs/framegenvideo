@@ -17,7 +17,14 @@ either offline (render a file) or streamed to a browser while it generates. Buil
 
 ## Web UI
 
-`start_server.bat` (or `python -m streamerframes serve`) starts the UI on http://localhost:8000.
+`start_server.bat` starts the UI in the background (no window) and opens http://localhost:8000; `stop_server.bat`
+stops it. `start_server.bat -Status` lists the addresses it's reachable on, `-NoBrowser` skips the browser and
+`-Foreground` runs it in the window with live output (same as `python -m streamerframes serve`). Startup errors go
+to `server-console.log`. `create_schtask.bat` starts it in the background at every logon.
+
+The server doesn't keep the PC awake while idle, so normal sleep settings apply. Only a running generation job
+holds off sleep, until it finishes. Watching an already-generated video from another device doesn't count as
+activity, so a sleep timeout shorter than the movie can put the PC to sleep mid-playback.
 
 - **Library:** every video under `movies_roots`, with its generation status and buttons: Original,
   Framegen (stream now), Generate in background (offline `quality` job), Export, Download, Delete cache.
@@ -33,6 +40,9 @@ either offline (render a file) or streamed to a browser while it generates. Buil
   segment and resumes afterwards); by default a new stream replaces an older one (`stream_policy`). Jobs
   survive server restarts: running workers are adopted, interrupted offline jobs resume (`auto_resume`).
 - Host is `127.0.0.1` by default. Set `host = "0.0.0.0"` to use it from other devices; there's no login.
+  If Windows Firewall blocks other devices (the page loads on this PC but not elsewhere), allow the port for the
+  local network only, from an admin PowerShell (change `8000` if you set a different `port`):
+  `New-NetFirewallRule -DisplayName "StreamerFrames (TCP 8000, LAN only)" -Direction Inbound -Protocol TCP -LocalPort 8000 -RemoteAddress LocalSubnet -Action Allow -Profile Any`
 - Logs: `cache/server.log` (rotated), and per generation `worker.log` / `ffmpeg-*.log` in its cache folder.
 
 Run `python -m streamerframes bench <movie> --crop` once before streaming so `scale=auto` can choose from

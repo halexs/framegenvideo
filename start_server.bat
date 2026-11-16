@@ -1,16 +1,9 @@
 @echo off
-REM Start the StreamerFrames web UI and job manager using the project's virtualenv Python.
-SETLOCAL
-cd /d "%~dp0"
-set VENV_PY=%~dp0..\.framegen\Scripts\python.exe
-if not exist "%VENV_PY%" (
-  echo Virtualenv Python not found at %VENV_PY%
-  echo Please create or point .framegen to your Python venv.
-  pause
-  exit /b 1
-)
-
-"%VENV_PY%" -m streamerframes serve %*
-
-echo Server exited. Press any key to close.
-pause
+REM Start the StreamerFrames web UI in the background and open the browser (double-click friendly).
+REM   start_server.bat               background, opens the browser
+REM   start_server.bat -NoBrowser    background only
+REM   start_server.bat -Foreground   run in this window with live output (Ctrl+C to stop)
+REM   start_server.bat -Status       show whether it is running
+REM Stop it with stop_server.bat.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_server.ps1" %*
+if errorlevel 1 pause

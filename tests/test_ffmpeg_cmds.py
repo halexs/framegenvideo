@@ -40,6 +40,7 @@ def test_encoder_segments():
     cmd = ffmpeg.encoder_cmd(info, tl, start_segment=3, run_id=7, out_dir=Path("c"))
     assert _arg(cmd, "-framerate") == "60000/1001"
     assert _arg(cmd, "-g") == "240"
+    assert _arg(cmd, "-bf") == "0"  # B-frame delay would shift segment timestamps
     assert _arg(cmd, "-force_key_frames") == "expr:eq(mod(n,240),0)"
     assert _arg(cmd, "-segment_start_number") == "3"
     assert float(_arg(cmd, "-output_ts_offset")) == float(3 * 240 / tl.out_fps)

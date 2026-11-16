@@ -21,6 +21,7 @@ from ..config import Settings, load_settings
 from ..jobs.manager import JobManager, job_view, segment_ranges
 from ..pipeline.audio import audio_state
 from ..probe import probe
+from .awake import PlaybackKeepAwake
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,12 @@ ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
 M3U8 = "application/vnd.apple.mpegurl"
 NO_CACHE = {"Cache-Control": "no-cache"}
 LONG_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+def is_playback_request(path: str) -> bool:
+    """Media a playing video keeps fetching. Playlists and status polls don't count: an open tab that's
+    paused shouldn't keep the PC awake."""
+    return path.startswith("/media/original/") or (path.startswith("/hls/") and path.endswith(".ts"))
 
 
 def _check_id(value: str) -> str:
@@ -92,8 +99,10 @@ NEAR_FRONTIER = 3  # segments ahead of a run's frontier that are worth waiting f
 
 def create_app(settings: Settings | None = None, manager: JobManager | None = None,
                config_path: str | None = None, start_manager: bool = True,
-               long_poll_seconds: float = LONG_POLL_SECONDS) -> FastAPI:
+               long_poll_seconds: float = LONG_POLL_SECONDS,
+               playback_awake: PlaybackKeepAwake | None = None) -> FastAPI:
     settings = settings or load_settings(config_path)
+    playback_awake = playback_awake or PlaybackKeepAwake()
     store = CacheStore(settings.cache_root)
     library = Library(settings.movies_roots)
     manager = manager or JobManager(settings, config_path=config_path)
@@ -107,18 +116,23 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
         if start_manager:
             manager.start()
             watcher.start()
+        playback_awake.start()
         try:
             yield
         finally:
+            playback_awake.stop()
             watcher.stop()
             manager.shutdown()
 
     app = FastAPI(title="StreamerFrames", lifespan=lifespan)
     app.state.settings, app.state.manager, app.state.library, app.state.store = settings, manager, library, store
+    app.state.playback_awake = playback_awake
 
     @app.middleware("http")
     async def _log_requests(request: Request, call_next):
         response = await call_next(request)
+        if response.status_code != 404 and is_playback_request(request.url.path):
+            playback_awake.touch()
         level = logging.INFO if request.url.path.startswith("/api") else logging.DEBUG
         log.log(level, "%s %s -> %s", request.method, request.url.path, response.status_code)
         return response
