@@ -4,6 +4,8 @@ Raise low-frame-rate video (23.976/24/25/30 fps films) to a higher frame rate wi
 either offline (render a file) or streamed to a browser while it generates. Built on Practical-RIFE (see
 `README.md`); the design and its rationale are in `PLAN.md`.
 
+What to do next on the Windows PC (benchmarks, real-GPU checks, Jellyfin) is in `NEXT_STEPS.md`.
+
 ## Setup (Windows, GTX 1080 Ti / Pascal)
 
 1. Python 3.11 venv (the launchers expect `..\.framegen`).
