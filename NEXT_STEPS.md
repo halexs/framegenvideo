@@ -4,6 +4,8 @@ Written 2026-11-16. This is a runbook for the Windows PC with the GTX 1080 Ti. S
 
 Work top to bottom. Tick the boxes and fill in the tables in this file, then commit it.
 
+**Code first, PC second.** Three small code tasks that need no GPU are specified in `AGENT_TASKS.md` for a coding agent: Jellyfin-friendly export names (used in step 8), a `report` command that prints the tables for steps 2–4, and correcting the README's description of sleep (step 4). Have them merged before starting; nothing else here can be done without the 1080 Ti.
+
 All commands are PowerShell, run from the repo root. The launchers expect the venv one level up, at `..\.framegen`.
 
 ```powershell
