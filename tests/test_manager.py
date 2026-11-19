@@ -1,9 +1,9 @@
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from streamerframes.config import Settings
@@ -23,6 +23,21 @@ def make_manager(tmp_path, **kw):
 
     kw.setdefault("poll_interval", 0.05)
     return JobManager(settings, resolver=resolver, worker_cmd=lambda f: [sys.executable, FAKE, str(f)], **kw)
+
+
+def kill_tree(pid):
+    """SIGKILL a worker and its children (on Windows a venv python is a launcher with a child)."""
+    try:
+        proc = psutil.Process(pid)
+        procs = proc.children(recursive=True) + [proc]
+    except psutil.NoSuchProcess:
+        return
+    for p in procs:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+    psutil.wait_procs(procs, timeout=5)
 
 
 def wait_for(cond, timeout=10.0):
@@ -54,7 +69,7 @@ def mgr(tmp_path):
     m.shutdown()
     for rec in m.jobs.values():  # never leave fake workers behind
         if rec.pid:
-            subprocess.run(["kill", "-9", str(rec.pid)], capture_output=True)
+            kill_tree(rec.pid)
 
 
 def test_runs_to_completion_and_dedupes(mgr, tmp_path):
@@ -143,7 +158,7 @@ def test_restart_adopts_running_worker(tmp_path):
 def test_restart_requeues_dead_offline_worker(tmp_path):
     m1 = make_manager(tmp_path)
     rec = m1.submit(video(tmp_path, "slow.mp4"), "offline", "quality")
-    subprocess.run(["kill", "-9", str(rec.pid)])
+    kill_tree(rec.pid)
     m1._procs[rec.id].wait()
     m1.shutdown()
 

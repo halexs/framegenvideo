@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -162,7 +163,7 @@ def test_bench_all_models(env):
     root, settings = env
     write_fake_model(root / "models" / "4.25.lite")
     cfg = root / "sf.toml"
-    cfg.write_text(f'cache_root = "{(root / "cache").as_posix()}"\nmodel_dir = "{settings.model_dir}"\n'
+    cfg.write_text(f'cache_root = "{(root / "cache").as_posix()}"\nmodel_dir = "{Path(settings.model_dir).as_posix()}"\n'
                    f'models_dir = "{(root / "models").as_posix()}"\n')
     r = subprocess.run([sys.executable, "-m", "streamerframes", "--config", str(cfg), "bench", "--size", "64x48",
                         "--device", "cpu", "--scales", "1.0", "--warmup", "1", "--iters", "1"],
