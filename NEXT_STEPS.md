@@ -24,8 +24,8 @@ git switch plan/windows-next-steps
 | 4 | Streaming in the browser | no | measured over HTTP: 14 s start, **0.81–0.84×** (not real time); browser, Compare, other devices, sleep left |
 | 5 | TensorRT go/no-go | no | done: **NO-GO** (0.82×) |
 | 6 | Settle the open questions in `PLAN.md` | config only | exports, LAN, disk set; 47.95 vs 60 on the TV left |
-| 7 | Jellyfin as the general streaming box | no | not started (install cancelled at the UAC prompt) |
-| 8 | Overnight renders into Jellyfin | small | code and config done; logon task and test with a real film left |
+| 7 | Jellyfin as the general streaming box | no | 12.4.0 installed (tray app, E:\Jellyfin), firewall rule added; setup wizard, libraries and apps left |
+| 8 | Overnight renders into Jellyfin | small | code, config and logon task done; test with a real film left |
 
 Pick one test film and use it throughout so the numbers are comparable. `PLAN.md` uses `E:\Movies\Batman Begins.mp4` (1920×800, 23.976 fps); the commands below assume it as `$movie`.
 
@@ -160,7 +160,7 @@ Running it on Windows needed three DLL folders on `PATH`; see "TensorRT" in `REA
 
 - [ ] **2× (47.95 fps) for streaming, true 60 only offline?** Watch ten minutes of each on your actual TV. If the 47.95 cadence bothers you on a 60 Hz screen, plan to watch pre-rendered `quality` files (step 8) and use streaming only for previews.
 - [x] **Where exports go.** Set to `E:/Media/Framegen` with `export_layout = "library"`. For step 7, set `export_dir` to a folder of its own that is not inside `movies_roots`, for example `E:/Media/Framegen`.
-- [x] **LAN access.** Already `0.0.0.0`; the firewall rule is still missing (step 4). `host = "0.0.0.0"` if step 4 worked from other devices.
+- [x] **LAN access.** `0.0.0.0`, with the LAN-only firewall rule for TCP 8000. `host = "0.0.0.0"` if step 4 worked from other devices.
 - [ ] **Pre-generate overnight?** Decided in step 8.
 - [x] Disk (E: has 2 TB free; `cache_max_gb = 200` kept): a 1080p film takes roughly 5–10 GB of cache. Set `cache_max_gb` to what the drive can spare.
 
@@ -172,12 +172,12 @@ StreamerFrames plays films in a browser. A media server adds what it lacks: TV a
 
 It replaces a personal library only. Netflix, Crunchyroll and YouTube content still needs their own apps.
 
-- [ ] Install Jellyfin Server (installer from <https://jellyfin.org/downloads/server>, or `winget search jellyfin` and install the server package). Choose "install as a service" so it runs without a login.
+- [x] Install Jellyfin Server (12.4.0 is installed in `E:\Jellyfin\Server` as the **tray app**, not a service: it runs only while you are logged in, like the StreamerFrames logon task. Reinstall with "install as a service" if it must run without a login) (installer from <https://jellyfin.org/downloads/server>, or `winget search jellyfin` and install the server package). Choose "install as a service" so it runs without a login.
 - [ ] Open http://localhost:8096 and finish the setup wizard. Create two libraries:
   - **Movies** → `E:\Movies`
   - **Movies 60fps** → the `export_dir` from step 6
 - [ ] Dashboard → Playback → Transcoding: hardware acceleration **NVENC**. Leave HEVC encoding off unless a test proves it works; the 1080 Ti's NVENC is limited there.
-- [ ] Firewall: allow TCP 8096 for the local subnet only (same pattern as the StreamerFrames rule).
+- [x] Firewall: allow TCP 8096 for the local subnet only (same pattern as the StreamerFrames rule).
 - [ ] Install the Jellyfin app on the TV and phone and sign in.
 - [ ] Play a 60 fps export on the TV. Open the playback info overlay and confirm it is **direct playing**, not transcoding, and that the TV shows 59.94 fps. If Jellyfin transcodes it, the frame rate or bitrate may be reduced and the GPU is being used twice; fix the client's quality setting or the export codec before going further.
 - [ ] Away from home: Tailscale on the PC and the phone. Do not forward port 8096 on the router.
@@ -197,7 +197,7 @@ Goal: drop a film in, find the 60 fps version in Jellyfin the next day.
   watch_profile = "quality"
   ```
   New files copied into a watch folder are queued automatically and exported when they finish (`watch_export`, on by default). Files already there are left alone.
-- [ ] `create_schtask.bat` so the server starts at every logon.
+- [x] `create_schtask.bat` so the server starts at every logon (needs an administrator prompt for an ONLOGON task).
 - [ ] Test with one film: copy it into the watch folder, confirm a job appears in the UI, and that the export lands in `export_dir` when it finishes.
 - [ ] Check the export's file name: with `export_layout = "library"` it is `E:\Media\Framegen\Title (Year)\Title (Year) - 60fps.mp4`. Confirm Jellyfin matches the film's metadata (name source files `Title (Year).mp4` for reliable matches).
 - [ ] Make Jellyfin notice new files: enable real-time monitoring on the **Movies 60fps** library, or leave the scheduled library scan on.
