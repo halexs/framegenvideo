@@ -4,7 +4,7 @@ Written 2026-11-16. This is a runbook for the Windows PC with the GTX 1080 Ti. S
 
 Work top to bottom. Tick the boxes and fill in the tables in this file, then commit it.
 
-**Code first, PC second.** Three small code tasks that need no GPU are specified in `AGENT_TASKS.md` for a coding agent: Jellyfin-friendly export names (used in step 8), a `report` command that prints the tables for steps 2–4, and correcting the README's description of sleep (step 4). Have them merged before starting; nothing else here can be done without the 1080 Ti.
+**Code first, PC second.** The three small code tasks in `AGENT_TASKS.md` are done: Jellyfin-friendly export names (`export_layout = "library"`, step 8), a `report` command that prints the tables for steps 2–4, and the README's description of sleep (step 4). Watch-folder jobs now also export when they finish (step 8).
 
 All commands are PowerShell, run from the repo root. The launchers expect the venv one level up, at `..\.framegen`.
 
@@ -106,7 +106,7 @@ This is the "watch at 60 fps" path: a true 59.94 fps file, generated unattended.
 - [ ] **Compare** shows the original and the framegen version side by side, in sync.
 - [ ] Restart the server mid-generation (`stop_server.bat`, `start_server.bat`). The job should be adopted or resumed.
 - [ ] From another device: set `host = "0.0.0.0"` in `streamerframes.toml`, add the LAN-only firewall rule from `README-StreamerFrames.md`, and open `http://<pc-ip>:8000` on a phone or the TV's browser. There is no login, so keep it on the home network.
-- [ ] Sleep check. Set the PC's sleep timeout to 5 minutes, play a finished film from another device for 15 minutes, and see whether the PC stays awake. `streamerframes/web/awake.py` holds off sleep while segments are being fetched, but `README-StreamerFrames.md` ("Web UI") still says remote playback does not count as activity. Whichever is true on the real machine, make the README say that; if the PC does sleep, that is a bug to fix in `awake.py`. Restore your sleep timeout afterwards.
+- [ ] Sleep check: confirm the README's description ("Web UI") on the real machine. Set the sleep timeout to 5 minutes, play a finished film from another device for 15 minutes (the PC must stay awake), then pause it (it should sleep about 2 minutes plus the timeout later). Try it with **Original** too, since a browser may buffer a whole file and stop fetching. Restore your sleep timeout afterwards.
 
 | Check | Result |
 |---|---|

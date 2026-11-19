@@ -24,9 +24,12 @@ stops it. `start_server.bat -Status` lists the addresses it's reachable on, `-No
 `-Foreground` runs it in the window with live output (same as `python -m streamerframes serve`). Startup errors go
 to `server-console.log`. `create_schtask.bat` starts it in the background at every logon.
 
-The server doesn't keep the PC awake while idle, so normal sleep settings apply. Only a running generation job
-holds off sleep, until it finishes. Watching an already-generated video from another device doesn't count as
-activity, so a sleep timeout shorter than the movie can put the PC to sleep mid-playback.
+An idle server doesn't keep the PC awake, so normal sleep settings apply. A running generation job holds off
+sleep until it finishes. Playback from any device (this PC, a phone, the TV) also holds it off: every fetch of a
+video segment or of the original file counts, and sleep is allowed again about two minutes after the last one.
+A paused player stops fetching, so pausing releases the PC; an open page that only polls status does not keep it
+awake. This is covered by unit tests (`tests/test_awake.py`) but not yet confirmed on the Windows machine; see
+`NEXT_STEPS.md` step 4.
 
 - **Library:** every video under `movies_roots`, with its generation status and buttons: Original,
   Framegen (stream now), Generate in background (offline `quality` job), Export, Download, Delete cache.
