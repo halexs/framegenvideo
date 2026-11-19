@@ -27,7 +27,7 @@ def bench_rows(entries: dict) -> list[list[str]]:
     rows = []
     for key, value in parsed:
         ms = float(value["ms"])
-        rows.append([f"{key['width']}×{key['height']}", key["model"], f"{key['scale']:g}",
+        rows.append([f"{key['width']}x{key['height']}", key["model"], f"{key['scale']:g}",
                      "yes" if key["graphs"] else "no", f"{ms:.1f}", f"{1000 / ms:.1f}"]
                     + ["yes" if sustains(ms, fps) else "no" for fps in REALTIME_SOURCES])
     return rows
@@ -35,10 +35,10 @@ def bench_rows(entries: dict) -> list[list[str]]:
 
 def bench_header() -> list[str]:
     return (["Size", "Model", "Scale", "CUDA graphs", "ms/frame", "Interpolations/s"]
-            + [f"2× {float(fps):.3f} fps" for fps in REALTIME_SOURCES])
+            + [f"2x {float(fps):.3f} fps" for fps in REALTIME_SOURCES])
 
 
-GEN_HEADER = ["Film", "Profile", "Output fps", "Status", "Done", "Source fps", "× real time"]
+GEN_HEADER = ["Film", "Profile", "Output fps", "Status", "Done", "Source fps", "x real time"]
 
 
 def generation_rows(store: CacheStore) -> list[list[str]]:
@@ -76,9 +76,9 @@ def report(cache_root: str | Path, markdown: bool = False) -> str:
     out.append(title.format("Benchmark") + (format_table(bench_header(), bench_rows(entries), markdown)
                                             if entries else BENCH_HINT))
     if entries:
-        out.append(f"Real time = at least {REALTIME_MARGIN:g}× the interpolations a 2× stream needs "
+        out.append(f"Real time = at least {REALTIME_MARGIN:g}x the interpolations a 2x stream needs "
                    "(the margin `scale = \"auto\"` uses).")
     out.append(title.format("Generations") + (format_table(GEN_HEADER, gens, markdown) if gens else GEN_HINT))
     if gens:
-        out.append("Source fps and × real time are the most recent ~60 s of the last run.")
+        out.append("Source fps and x real time are the most recent ~60 s of the last run.")
     return "\n\n".join(out) + "\n"

@@ -36,9 +36,9 @@ def test_rows(tmp_path):
     fill(tmp_path)
     from streamerframes.bench import load_calibration
     assert bench_rows(load_calibration(tmp_path)) == [
-        ["1920×800", "default", "1", "yes", "40.0", "25.0", "no", "no"],
-        ["1920×800", "default", "0.5", "yes", "25.0", "40.0", "yes", "yes"],
-        ["1280×720", "4.25.lite", "1", "no", "36.0", "27.8", "yes", "no"],
+        ["1920x800", "default", "1", "yes", "40.0", "25.0", "no", "no"],
+        ["1920x800", "default", "0.5", "yes", "25.0", "40.0", "yes", "yes"],
+        ["1280x720", "4.25.lite", "1", "no", "36.0", "27.8", "yes", "no"],
     ]
     assert generation_rows(CacheStore(tmp_path)) == [
         ["Batman Begins.mp4", "quality", "59.940", "complete", "100%", "21.2", "0.89"],
