@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -144,7 +145,7 @@ def test_watch_folder(env):
     (watched / "old.mp4").write_bytes(b"old")
     settings.watch_dirs = [str(watched)]
     queued = []
-    w = FolderWatcher(settings, lambda path, kind, profile: queued.append((path, kind, profile)))
+    w = FolderWatcher(settings, lambda path, kind, profile, export: queued.append((path, kind, profile, export)))
     assert w.scan() == []                                  # baseline: existing files are left alone
     (watched / "new.mkv").write_bytes(b"part")
     (watched / "notes.txt").write_bytes(b"x")
@@ -152,9 +153,9 @@ def test_watch_folder(env):
     (watched / "new.mkv").write_bytes(b"partial2")
     assert w.scan() == []                                  # still changing
     assert w.scan() == [str(watched / "new.mkv")]          # stable -> queued once
-    assert queued == [(str(watched / "new.mkv"), "offline", "quality")]
+    assert queued == [(str(watched / "new.mkv"), "offline", "quality", True)]
     assert w.scan() == []
-    w2 = FolderWatcher(settings, lambda *a: queued.append(a))  # state survives restarts
+    w2 = FolderWatcher(settings, lambda *a, **kw: queued.append(a))  # state survives restarts
     assert w2.scan() == [] and len(queued) == 1
 
 
@@ -162,7 +163,7 @@ def test_bench_all_models(env):
     root, settings = env
     write_fake_model(root / "models" / "4.25.lite")
     cfg = root / "sf.toml"
-    cfg.write_text(f'cache_root = "{(root / "cache").as_posix()}"\nmodel_dir = "{settings.model_dir}"\n'
+    cfg.write_text(f'cache_root = "{(root / "cache").as_posix()}"\nmodel_dir = "{Path(settings.model_dir).as_posix()}"\n'
                    f'models_dir = "{(root / "models").as_posix()}"\n')
     r = subprocess.run([sys.executable, "-m", "streamerframes", "--config", str(cfg), "bench", "--size", "64x48",
                         "--device", "cpu", "--scales", "1.0", "--warmup", "1", "--iters", "1"],

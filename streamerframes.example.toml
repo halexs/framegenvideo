@@ -4,7 +4,8 @@
 
 movies_roots = ["E:/Movies"]
 cache_root   = "E:/StreamerFrames/cache"
-export_dir   = ""                     # empty = inside the cache; else e.g. "E:/Movies/_framegen"
+export_dir   = ""                     # empty = inside the cache; else e.g. "E:/Media/Framegen"
+export_layout = "flat"                # "library": <export_dir>/Title (Year)/Title (Year) - 60fps.mp4 (Jellyfin)
 model_dir    = "E:/StreamerFrames/Practical-RIFE/train_log"   # IFNet_HDv3.py + flownet.pkl
 models_dir   = "E:/StreamerFrames/Practical-RIFE/models"      # optional extra models: models/<name>/...
 host = "127.0.0.1"                    # "0.0.0.0" for LAN access; there is no authentication
@@ -15,6 +16,7 @@ fill_gaps = true                      # after streaming, fill holes left by seek
 stream_policy = "newest_wins"         # or "queue"
 watch_dirs = []                       # new videos here get an offline job (watch_profile)
 watch_profile = "quality"
+watch_export = true                   # export watch-folder jobs to export_dir when they finish
 model_preference = []                 # for model = "auto": best quality first, e.g. ["default", "4.25.lite"]
 hevc_encoder = "hevc_nvenc"           # used by HEVC exports ("libx265" without NVENC)
 

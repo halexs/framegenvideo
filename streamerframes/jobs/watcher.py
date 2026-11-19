@@ -18,7 +18,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".webm", ".avi", ".ts", ".m2
 
 class FolderWatcher:
     def __init__(self, settings: Settings, submit, interval: float = 60.0):
-        """``submit(path, kind, profile)`` queues a job (JobManager.submit)."""
+        """``submit(path, kind, profile, export=...)`` queues a job (JobManager.submit)."""
         self.settings = settings
         self.submit = submit
         self.interval = interval
@@ -48,7 +48,7 @@ class FolderWatcher:
                     files[key] = {"sig": sig, "queued": False}  # new or still changing: wait one more scan
                 elif not entry["queued"]:
                     try:
-                        self.submit(key, "offline", self.settings.watch_profile)
+                        self.submit(key, "offline", self.settings.watch_profile, export=self.settings.watch_export)
                         entry["queued"] = True
                         queued.append(key)
                         log.info("watch folder: queued %s", key)

@@ -9,6 +9,7 @@ from .cache.store import atomic_write_json, read_json
 
 log = logging.getLogger(__name__)
 SCALES = (1.0, 0.5)
+REALTIME_MARGIN = 1.1  # scale/model=auto must sustain this multiple of the needed interpolation rate
 
 
 def calibration_path(cache_root: str | Path) -> Path:
@@ -17,6 +18,14 @@ def calibration_path(cache_root: str | Path) -> Path:
 
 def entry_key(gpu: str, model: str, width: int, height: int, scale: float, graphs: bool) -> str:
     return f"{gpu}|{model}|{width}x{height}|s{float(scale)}|g{int(bool(graphs))}"
+
+
+def parse_key(key: str) -> dict:
+    """Inverse of entry_key."""
+    gpu, model, size, scale, graphs = key.split("|")
+    width, height = map(int, size.split("x"))
+    return {"gpu": gpu, "model": model, "width": width, "height": height, "scale": float(scale[1:]),
+            "graphs": graphs == "g1"}
 
 
 def load_calibration(cache_root) -> dict:
@@ -48,7 +57,7 @@ def estimate_ms(entries: dict, model: str, width: int, height: int, scale: float
 
 
 def choose_scale(entries: dict, model: str, width: int, height: int, interps_per_sec: float, graphs: bool,
-                 gpu: str | None = None, margin: float = 1.1) -> float | None:
+                 gpu: str | None = None, margin: float = REALTIME_MARGIN) -> float | None:
     """Highest-quality scale fast enough for real time with ``margin``, else the fastest measured one."""
     choice = choose_model_and_scale(entries, [model], width, height, interps_per_sec, graphs, gpu=gpu,
                                     margin=margin)
@@ -57,7 +66,7 @@ def choose_scale(entries: dict, model: str, width: int, height: int, interps_per
 
 def choose_model_and_scale(entries: dict, models: list[str], width: int, height: int, interps_per_sec: float,
                            graphs: bool, scales=SCALES, gpu: str | None = None,
-                           margin: float = 1.1) -> tuple[str, float] | None:
+                           margin: float = REALTIME_MARGIN) -> tuple[str, float] | None:
     """Best (model, scale) fast enough for real time: models in quality order, full scale before half.
 
     If nothing is fast enough, the fastest measured combination.

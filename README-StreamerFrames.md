@@ -4,6 +4,8 @@ Raise low-frame-rate video (23.976/24/25/30 fps films) to a higher frame rate wi
 either offline (render a file) or streamed to a browser while it generates. Built on Practical-RIFE (see
 `README.md`); the design and its rationale are in `PLAN.md`.
 
+What to do next on the Windows PC (benchmarks, real-GPU checks, Jellyfin) is in `NEXT_STEPS.md`.
+
 ## Setup (Windows, GTX 1080 Ti / Pascal)
 
 1. Python 3.11 venv (the launchers expect `..\.framegen`).
@@ -22,9 +24,12 @@ stops it. `start_server.bat -Status` lists the addresses it's reachable on, `-No
 `-Foreground` runs it in the window with live output (same as `python -m streamerframes serve`). Startup errors go
 to `server-console.log`. `create_schtask.bat` starts it in the background at every logon.
 
-The server doesn't keep the PC awake while idle, so normal sleep settings apply. Only a running generation job
-holds off sleep, until it finishes. Watching an already-generated video from another device doesn't count as
-activity, so a sleep timeout shorter than the movie can put the PC to sleep mid-playback.
+An idle server doesn't keep the PC awake, so normal sleep settings apply. A running generation job holds off
+sleep until it finishes. Playback from any device (this PC, a phone, the TV) also holds it off: every fetch of a
+video segment or of the original file counts, and sleep is allowed again about two minutes after the last one.
+A paused player stops fetching, so pausing releases the PC; an open page that only polls status does not keep it
+awake. This is covered by unit tests (`tests/test_awake.py`) but not yet confirmed on the Windows machine; see
+`NEXT_STEPS.md` step 4.
 
 - **Library:** every video under `movies_roots`, with its generation status and buttons: Original,
   Framegen (stream now), Generate in background (offline `quality` job), Export, Download, Delete cache.
@@ -60,7 +65,13 @@ real measurements (without calibration it falls back to: full scale up to 720p, 
 - **HEVC export:** `render ... --export-codec hevc`, or the HEVC button in the library, re-encodes the export
   with `hevc_encoder` (NVENC on Pascal has no HEVC B-frames). Streaming stays H.264 for browsers.
 - **Watch folders:** `watch_dirs = ["E:/Movies/incoming"]` queues an offline `watch_profile` job for each new
-  file once it has finished copying. Files already there when a folder is first watched are left alone.
+  file once it has finished copying, and exports it to `export_dir` when it finishes (`watch_export = false`
+  turns that off). Files already there when a folder is first watched are left alone.
+- **Export names:** by default an export is `<export_dir>/<title>.59.940fps.mp4`. For a media server such as
+  Jellyfin set `export_layout = "library"`: the export becomes `<export_dir>/<title>/<title> - 60fps.mp4`
+  (` HEVC` added for HEVC exports), which Jellyfin shows as a "60fps" version of the film and still matches
+  metadata on `Title (Year)`. Only characters Windows forbids in file names are replaced. `--export <path>`
+  always wins.
 
 ## TensorRT (experimental, PLAN.md Phase 6)
 
@@ -78,6 +89,13 @@ GO means at least 1.25× faster than PyTorch + CUDA graphs with PSNR ≥ 45 dB. 
 `backend = "tensorrt"` in a profile. Missing TensorRT or a missing engine for a size falls back to PyTorch with
 a warning. If it's NO-GO, record the numbers below and leave the backend off.
 
+On Windows, TensorRT's Python package needs three DLL folders on `PATH`: `TensorRT-8.6.1.6\lib`, the venv's
+`Lib\site-packages\torch\lib` (cuBLAS 12) and a folder with cuDNN 8 (`cudnn64_8.dll`; torch bundles cuDNN 9).
+cuDNN 8 can be taken from the `nvidia-cudnn-cu12==8.9.7.29` wheel's `nvidia/cudnn/bin` without installing it.
+
+**Result on the 1080 Ti (2026-11-19): NO-GO.** 1920×800 scale 1.0: PyTorch + CUDA graphs 46.0 ms, TensorRT FP32
+56.2 ms (0.82×, slower), PSNR 124.8 dB. The backend stays off.
+
 ## Command line
 
 ```
@@ -89,6 +107,7 @@ python -m streamerframes bench [<video> --crop | --size 1920x800] [--model all] 
 python -m streamerframes render <video> [--profile quality|realtime] [--target-fps 60 | --multi 2]
                                 [--scale auto|1.0|0.5] [--model NAME|auto] [--export out.mp4 | --no-export]
                                 [--export-codec copy|hevc]
+python -m streamerframes report [--markdown]          # benchmark + generation-speed tables (for this README)
 python -m streamerframes cache ls | rm <video_id|path> | gc [--max-gb N]
 python -m streamerframes trt export|build|compare [<video> --crop | --size WxH] [--scale 1.0]
 ```
@@ -121,8 +140,39 @@ source's audio and subtitles copied.
 
 ## Measured performance
 
-To be filled in on the 1080 Ti (PLAN.md section 2 has the model-only numbers): `bench` at 1920×800 for
-scale 1.0/0.5 with and without CUDA graphs, and end-to-end `render` src fps for `Batman Begins.mp4`.
+Measured 2026-11-19 on the GTX 1080 Ti PC (Ryzen 5 5600G, driver 582.28, torch 2.13.0+cu126, RIFE 4.25),
+nothing else on the GPU. `python -m streamerframes report --markdown` prints these tables from the cache.
+
+**Model only** (`bench`; `Batman Begins.mp4` is 1920×800 with no letterbox to crop). A 2× stream of a 23.976 fps
+film needs 24 interpolations/s, and `scale = "auto"` wants 1.1× that (26.4/s).
+
+| Size | Scale | ms/frame, no graphs | ms/frame, CUDA graphs | Interpolations/s | Real time for 24p 2×? |
+|---|---|---|---|---|---|
+| 1920×800 | 1.0 | 46.8 | 46.2 | 21.6 | no |
+| 1920×800 | 0.5 | 33.8 | 33.5 | 29.9 | yes (auto picks this) |
+| 1920×1080 | 1.0 | 61.4 | 60.6 | 16.5 | no |
+| 1920×1080 | 0.5 | 43.1 | 42.4 | 23.6 | no |
+| 1280×720 | 1.0 | 30.0 | 30.0 | 33.3 | yes |
+| 1280×720 | 0.5 | 21.1 | 20.4 | 49.1 | yes |
+
+In line with PLAN.md section 2 (49.5 / 35.4 ms at 1920×832). CUDA graphs gain only 1–3% here.
+
+**End to end:**
+
+| What | Result |
+|---|---|
+| Offline `render --profile quality` (23.976 → 59.94), 10 min of `Batman Begins.mp4` | 8.8–9.1 source fps, 0.37× real time (27 min for 10 min; a full film ≈ 6 h) |
+| Export size, `quality` (H.264, cq 18) | 1.84 GB per 10 min (24.5 Mbit/s; ≈ 26 GB per film) |
+| Export size, `--export-codec hevc` | 1.0 GB per 10 min (13.2 Mbit/s); the re-encode takes 2 min per 10 min |
+| Stream (`realtime`, 2×, auto → scale 0.5), time to first segment | 14 s |
+| Stream speed | 0.81–0.84× real time (19.5–20 source fps) |
+| Seek 1 h ahead of the generated part | segment served after 14 s |
+| Server restart mid-stream | running worker adopted, generation continued |
+
+Streaming 1920×800 is **not** real time on this PC: the model alone would manage 1.25×, but end to end the GPU is
+only ~71% busy while the worker process uses ~5 CPU cores and the NVENC encoder's ffmpeg ~2.4 (the 6-core CPU is
+at 100%). The page still plays without stalling, after waiting for a lead of about 18% of the remaining film.
+Reducing the worker's CPU work is the next speed-up to look at; 720p sources stream in real time.
 
 ## Tests
 

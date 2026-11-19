@@ -72,6 +72,7 @@ class Settings:
     movies_roots: list[str] = field(default_factory=lambda: ["E:/Movies"])
     cache_root: str = str(REPO_ROOT / "cache")
     export_dir: str = ""               # empty = inside the cache
+    export_layout: str = "flat"        # flat: <stem>.59.940fps.mp4 | library: <stem>/<stem> - 60fps.mp4
     model_dir: str = str(REPO_ROOT / "train_log")
     models_dir: str = str(REPO_ROOT / "models")
     host: str = "127.0.0.1"            # set 0.0.0.0 for LAN access (there is no auth)
@@ -83,6 +84,7 @@ class Settings:
     stream_policy: str = "newest_wins"  # newest_wins | queue
     watch_dirs: list[str] = field(default_factory=list)
     watch_profile: str = "quality"
+    watch_export: bool = True          # export watch-folder jobs to export_dir when they finish
     model_preference: list[str] = field(default_factory=list)  # best quality first, for model = "auto"
     hevc_encoder: str = "hevc_nvenc"   # for HEVC exports; libx265 works without NVENC
     ffmpeg: str = "ffmpeg"
@@ -152,6 +154,8 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
             if not hasattr(settings, key):
                 raise ValueError(f"{path}: unknown setting {key!r}")
             setattr(settings, key, value)
+    if settings.export_layout not in ("flat", "library"):
+        raise ValueError(f"{path}: export_layout must be 'flat' or 'library'")
     if env.get("MOVIES_DIR"):
         settings.movies_roots = [p for p in env["MOVIES_DIR"].split(os.pathsep) if p]
     for key, attr in (("CACHE_DIR", "cache_root"), ("MODEL_DIR", "model_dir"), ("HOST", "host")):
