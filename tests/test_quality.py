@@ -145,7 +145,7 @@ def test_watch_folder(env):
     (watched / "old.mp4").write_bytes(b"old")
     settings.watch_dirs = [str(watched)]
     queued = []
-    w = FolderWatcher(settings, lambda path, kind, profile: queued.append((path, kind, profile)))
+    w = FolderWatcher(settings, lambda path, kind, profile, export: queued.append((path, kind, profile, export)))
     assert w.scan() == []                                  # baseline: existing files are left alone
     (watched / "new.mkv").write_bytes(b"part")
     (watched / "notes.txt").write_bytes(b"x")
@@ -153,9 +153,9 @@ def test_watch_folder(env):
     (watched / "new.mkv").write_bytes(b"partial2")
     assert w.scan() == []                                  # still changing
     assert w.scan() == [str(watched / "new.mkv")]          # stable -> queued once
-    assert queued == [(str(watched / "new.mkv"), "offline", "quality")]
+    assert queued == [(str(watched / "new.mkv"), "offline", "quality", True)]
     assert w.scan() == []
-    w2 = FolderWatcher(settings, lambda *a: queued.append(a))  # state survives restarts
+    w2 = FolderWatcher(settings, lambda *a, **kw: queued.append(a))  # state survives restarts
     assert w2.scan() == [] and len(queued) == 1
 
 

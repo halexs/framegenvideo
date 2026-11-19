@@ -16,9 +16,26 @@ from .procs import FfmpegProcess
 log = logging.getLogger(__name__)
 
 
-def default_export_name(info: VideoInfo, manifest: dict, container: str, video_codec: str = "copy") -> str:
-    stem = re.sub(r"[^\w.\- ]+", "_", Path(info.path).stem).strip() or "video"
+EXPORT_LAYOUTS = ("flat", "library")
+
+
+def default_export_name(info: VideoInfo, manifest: dict, container: str, video_codec: str = "copy",
+                        layout: str = "flat") -> str:
+    """File name, relative to the export folder.
+
+    ``flat``: ``<stem>.59.940fps.mp4``. ``library``: ``<stem>/<stem> - 60fps.mp4``, which Jellyfin (and
+    similar servers) treat as a named version of the film ``<stem>``, so metadata matching on
+    ``Title (Year)`` keeps working.
+    """
+    if layout not in EXPORT_LAYOUTS:
+        raise ValueError(f"export_layout must be one of {EXPORT_LAYOUTS}, not {layout!r}")
     fps = Fraction(manifest["out_fps"])
+    if layout == "library":
+        # Only what Windows forbids: "Title (Year)" must survive for metadata matching.
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", Path(info.path).stem).strip(" .") or "video"
+        label = f"{round(fps)}fps" + (" HEVC" if video_codec == "hevc" else "")
+        return f"{stem}/{stem} - {label}.{container}"
+    stem = re.sub(r"[^\w.\- ]+", "_", Path(info.path).stem).strip() or "video"
     tag = ".hevc" if video_codec == "hevc" else ""
     return f"{stem}.{float(fps):.3f}fps{tag}.{container}".replace(".000fps", "fps")
 
@@ -40,14 +57,15 @@ def video_duration(path: Path, ffprobe: str = "ffprobe") -> float:
 
 
 def export(cache: ProfileCache, info: VideoInfo, output: Path | None = None, container: str = "auto",
-           export_dir: Path | None = None, video_codec: str = "copy", hevc_encoder: str = "hevc_nvenc") -> Path:
+           export_dir: Path | None = None, video_codec: str = "copy", hevc_encoder: str = "hevc_nvenc",
+           layout: str = "flat") -> Path:
     manifest = cache.manifest() or {}
     if manifest.get("status") != "complete":
         raise RuntimeError(f"cache is {manifest.get('status', 'missing')}, not complete")
     container = ffmpeg.export_container(info, container)
     if output is None:
         out_dir = Path(export_dir) if export_dir else cache.export_dir
-        output = out_dir / default_export_name(info, manifest, container, video_codec)
+        output = out_dir / default_export_name(info, manifest, container, video_codec, layout)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     segments = [cache.segment_path(k) for k in range(manifest["total_segments"])]

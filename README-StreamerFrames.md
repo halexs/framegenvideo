@@ -62,7 +62,13 @@ real measurements (without calibration it falls back to: full scale up to 720p, 
 - **HEVC export:** `render ... --export-codec hevc`, or the HEVC button in the library, re-encodes the export
   with `hevc_encoder` (NVENC on Pascal has no HEVC B-frames). Streaming stays H.264 for browsers.
 - **Watch folders:** `watch_dirs = ["E:/Movies/incoming"]` queues an offline `watch_profile` job for each new
-  file once it has finished copying. Files already there when a folder is first watched are left alone.
+  file once it has finished copying, and exports it to `export_dir` when it finishes (`watch_export = false`
+  turns that off). Files already there when a folder is first watched are left alone.
+- **Export names:** by default an export is `<export_dir>/<title>.59.940fps.mp4`. For a media server such as
+  Jellyfin set `export_layout = "library"`: the export becomes `<export_dir>/<title>/<title> - 60fps.mp4`
+  (` HEVC` added for HEVC exports), which Jellyfin shows as a "60fps" version of the film and still matches
+  metadata on `Title (Year)`. Only characters Windows forbids in file names are replaced. `--export <path>`
+  always wins.
 
 ## TensorRT (experimental, PLAN.md Phase 6)
 

@@ -182,9 +182,15 @@ def run_job(job: Job, settings: Settings | None = None, stop_event: threading.Ev
                 audio_stop.set()  # never leave an orphaned ffmpeg behind
             audio_thread.join()
     if result.status == "complete" and job.export:
-        export(cache, info, Path(job.export_path) if job.export_path else None, job.container,
-               Path(settings.export_dir) if settings.export_dir else None, job.export_codec,
-               settings.hevc_encoder)
+        cache.update_manifest(export_state="running", export_error=None)
+        try:
+            export(cache, info, Path(job.export_path) if job.export_path else None, job.container,
+                   Path(settings.export_dir) if settings.export_dir else None, job.export_codec,
+                   settings.hevc_encoder, settings.export_layout)
+        except Exception as exc:
+            cache.update_manifest(export_state="failed", export_error=str(exc))  # shown in the library
+            raise
+        cache.update_manifest(export_state="done")
     return result
 
 

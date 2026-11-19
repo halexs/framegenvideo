@@ -280,7 +280,7 @@ def create_app(settings: Settings | None = None, manager: JobManager | None = No
             try:
                 info = probe(path, settings.ffprobe)
                 export(pc, info, export_dir=Path(settings.export_dir) if settings.export_dir else None,
-                       video_codec=codec, hevc_encoder=settings.hevc_encoder)
+                       video_codec=codec, hevc_encoder=settings.hevc_encoder, layout=settings.export_layout)
                 pc.update_manifest(export_state="done", export_error=None)
             except Exception as exc:  # noqa: BLE001 - shown in the UI
                 log.exception("export failed")

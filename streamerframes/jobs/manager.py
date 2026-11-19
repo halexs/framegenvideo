@@ -61,6 +61,7 @@ class JobRecord:
     error: str | None = None
     runs: int = 0
     last_retarget: float | None = None
+    export: bool = False           # export to export_dir once complete (watch-folder jobs)
 
     @property
     def cache(self) -> ProfileCache:
@@ -192,7 +193,7 @@ class JobManager:
 
     # API
     def submit(self, video_path: str, kind: str = "offline", profile: str = "realtime",
-               start_segment: int = 0) -> JobRecord:
+               start_segment: int = 0, export: bool = False) -> JobRecord:
         if kind not in PRIORITY:
             raise ValueError(f"kind must be one of {sorted(PRIORITY)}")
         vid, pid, cache_dir = self.resolver(video_path, profile, kind)
@@ -202,9 +203,13 @@ class JobManager:
                     if kind == "stream" and rec.kind == "offline":
                         rec.kind = "stream"  # promote: someone is watching now
                         self._changed(rec)
+                    if export and not rec.export:
+                        rec.export = True
+                        self._changed(rec)
                     return rec
             rec = JobRecord(id=uuid.uuid4().hex[:12], video_id=vid, video_path=video_path, profile=profile,
-                            profile_id=pid, cache_dir=cache_dir, kind=kind, start_segment=start_segment)
+                            profile_id=pid, cache_dir=cache_dir, kind=kind, start_segment=start_segment,
+                            export=export)
             if kind == "stream" and self.settings.stream_policy == "newest_wins":
                 for other in self.jobs.values():
                     if other.kind == "stream" and other.state == "queued":
@@ -343,6 +348,7 @@ class JobManager:
         job_file = job_dir / f"{rec.id}.json"
         payload = {"job_id": rec.id, "video_path": rec.video_path, "profile": rec.profile, "kind": rec.kind,
                    "start_segment": rec.start_segment, "config": self.config_path, "cache_dir": rec.cache_dir,
+                   "export": rec.export,
                    **self.job_defaults}
         atomic_write_json(job_file, payload)
         cache = rec.cache

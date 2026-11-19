@@ -179,13 +179,14 @@ Goal: drop a film in, find the 60 fps version in Jellyfin the next day.
 - [ ] In `streamerframes.toml`:
   ```toml
   export_dir    = "E:/Media/Framegen"
+  export_layout = "library"
   watch_dirs    = ["E:/Movies/incoming"]
   watch_profile = "quality"
   ```
-  New files copied into a watch folder are queued automatically. Files already there are left alone.
+  New files copied into a watch folder are queued automatically and exported when they finish (`watch_export`, on by default). Files already there are left alone.
 - [ ] `create_schtask.bat` so the server starts at every logon.
 - [ ] Test with one film: copy it into the watch folder, confirm a job appears in the UI, and that the export lands in `export_dir` when it finishes.
-- [ ] Check the export's file name. Jellyfin matches metadata on `Title (Year).ext`; if the export name carries extra suffixes that break matching, change how the export is named (small code change in the export step; keep the profile in a subfolder name instead of the file name).
+- [ ] Check the export's file name: with `export_layout = "library"` it is `E:\Media\Framegen\Title (Year)\Title (Year) - 60fps.mp4`. Confirm Jellyfin matches the film's metadata (name source files `Title (Year).mp4` for reliable matches).
 - [ ] Make Jellyfin notice new files: enable real-time monitoring on the **Movies 60fps** library, or leave the scheduled library scan on.
 - [ ] Existing library: decide whether to queue everything. At the speed measured in step 3, estimate the total (hours per film × number of films) before starting; this may be weeks of nights.
 - [ ] Waking the PC for overnight work. Two options:
