@@ -21,18 +21,37 @@ SEGMENT_RE = re.compile(r"v_(\d+)\.ts$")
 STATUSES = ("new", "running", "paused", "complete", "failed")
 
 
+# On Windows, replacing a file that another process has open (and opening one mid-replace) fails with
+# PermissionError for a moment; the worker writes progress.json while the server reads it.
+SHARING_RETRIES = 20
+SHARING_DELAY = 0.025
+
+
 def atomic_write_json(path: Path, data) -> None:
     path = Path(path)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(SHARING_RETRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == SHARING_RETRIES - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(SHARING_DELAY)
 
 
 def read_json(path: Path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+    for attempt in range(SHARING_RETRIES):
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return default
+        except PermissionError:
+            if attempt == SHARING_RETRIES - 1:
+                raise
+            time.sleep(SHARING_DELAY)
 
 
 def video_id_for(path: str | Path) -> str:

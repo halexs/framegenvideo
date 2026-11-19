@@ -113,3 +113,42 @@ def test_store_listing_remove_and_gc(tmp_path):
 
     store.remove("ccc")
     assert store.video_ids() == ["aaa", "bbb"]  # gc keeps source.json; remove() drops the whole video
+
+
+def test_json_retries_windows_sharing_violations(tmp_path, monkeypatch):
+    """Windows: replacing or opening a file another process holds open fails briefly with PermissionError."""
+    import pathlib
+
+    from streamerframes.cache import store
+
+    monkeypatch.setattr(store, "SHARING_DELAY", 0.001)
+    p = tmp_path / "progress.json"
+    real_replace, real_read = os.replace, pathlib.Path.read_text
+    fails = {"replace": 2, "read": 2}
+
+    def flaky_replace(src, dst):
+        if fails["replace"]:
+            fails["replace"] -= 1
+            raise PermissionError(13, "Access is denied", str(dst))
+        real_replace(src, dst)
+
+    def flaky_read(self, *a, **kw):
+        if fails["read"]:
+            fails["read"] -= 1
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(store.os, "replace", flaky_replace)
+    monkeypatch.setattr(pathlib.Path, "read_text", flaky_read)
+    atomic_write_json(p, {"x": 1})
+    assert read_json(p) == {"x": 1}
+    assert fails == {"replace": 0, "read": 0}
+    assert not list(tmp_path.glob("*.tmp"))
+
+    fails["replace"] = 10**6  # a file that stays locked still fails, and leaves no temp file behind
+    try:
+        atomic_write_json(p, {"x": 2})
+        raise AssertionError("expected PermissionError")
+    except PermissionError:
+        pass
+    assert not list(tmp_path.glob("*.tmp"))
