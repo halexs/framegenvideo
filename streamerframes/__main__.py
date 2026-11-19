@@ -1,4 +1,4 @@
-"""CLI: python -m streamerframes {serve,check,probe,plan,render,bench,cache,trt}."""
+"""CLI: python -m streamerframes {serve,check,probe,plan,render,bench,report,cache,trt}."""
 from __future__ import annotations
 
 import argparse
@@ -319,6 +319,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=30)
 
+    p = sub.add_parser("report", help="benchmark and generation-speed tables (for the README)")
+    p.add_argument("--markdown", action="store_true", help="Markdown tables, ready to paste")
+
     p = sub.add_parser("trt", help="TensorRT backend (experimental): export, build, compare")
     tsub = p.add_subparsers(dest="trt_cmd", required=True)
     for name, text in (("export", "export ONNX and verify it against PyTorch with ONNX Runtime"),
@@ -366,6 +369,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_bench(args)
         if args.command == "cache":
             return cmd_cache(args)
+        if args.command == "report":
+            from .report import report
+            print(report(load_settings(args.config).cache_root, markdown=args.markdown), end="")
+            return 0
         if args.command == "trt":
             return cmd_trt(args)
     except (RuntimeError, ValueError, FileNotFoundError) as exc:

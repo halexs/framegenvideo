@@ -64,7 +64,7 @@ $movie = "E:\Movies\Batman Begins.mp4"
   python -m streamerframes bench --size 1920x1080 --model all
   python -m streamerframes bench --size 1280x720 --model all
   ```
-- [ ] Copy the printed lines into this table. A 23.976 fps film at 2× needs 24 interpolations per second for real time; the `realtime` profile wants 1.1× that, so 26.4.
+- [ ] Copy the numbers into this table (`python -m streamerframes report` prints them as a table). A 23.976 fps film at 2× needs 24 interpolations per second for real time; the `realtime` profile wants 1.1× that, so 26.4.
 
 | Size | Model | Scale | CUDA graphs | ms/frame | Interpolations/s | Real time for 24p 2×? |
 |---|---|---|---|---|---|---|
@@ -116,7 +116,7 @@ This is the "watch at 60 fps" path: a true 59.94 fps file, generated unattended.
 | Seek ahead works | |
 | Stays awake during remote playback | |
 
-- [ ] Write the numbers from steps 2–4 into the "Measured performance" section of `README-StreamerFrames.md`.
+- [ ] Write the numbers from steps 2–4 into the "Measured performance" section of `README-StreamerFrames.md` (`python -m streamerframes report --markdown` prints the tables).
 
 **Done when:** a film streams without stalling on another device, and the README's performance section is no longer empty.
 

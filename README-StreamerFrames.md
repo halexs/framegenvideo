@@ -97,6 +97,7 @@ python -m streamerframes bench [<video> --crop | --size 1920x800] [--model all] 
 python -m streamerframes render <video> [--profile quality|realtime] [--target-fps 60 | --multi 2]
                                 [--scale auto|1.0|0.5] [--model NAME|auto] [--export out.mp4 | --no-export]
                                 [--export-codec copy|hevc]
+python -m streamerframes report [--markdown]          # benchmark + generation-speed tables (for this README)
 python -m streamerframes cache ls | rm <video_id|path> | gc [--max-gb N]
 python -m streamerframes trt export|build|compare [<video> --crop | --size WxH] [--scale 1.0]
 ```
@@ -131,6 +132,7 @@ source's audio and subtitles copied.
 
 To be filled in on the 1080 Ti (PLAN.md section 2 has the model-only numbers): `bench` at 1920×800 for
 scale 1.0/0.5 with and without CUDA graphs, and end-to-end `render` src fps for `Batman Begins.mp4`.
+`python -m streamerframes report --markdown` prints both as tables to paste here.
 
 ## Tests
 
