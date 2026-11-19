@@ -18,14 +18,14 @@ git switch plan/windows-next-steps
 
 | # | Step | Needs new code | State |
 |---|---|---|---|
-| 1 | Environment and self-check | no | not started |
-| 2 | Benchmark and calibrate | no | not started |
-| 3 | Offline render, end to end | no | not started |
-| 4 | Streaming in the browser | no | not started |
-| 5 | TensorRT go/no-go | no | not started |
-| 6 | Settle the open questions in `PLAN.md` | config only | not started |
-| 7 | Jellyfin as the general streaming box | no | not started |
-| 8 | Overnight renders into Jellyfin | small | not started |
+| 1 | Environment and self-check | no | done 2026-11-19 |
+| 2 | Benchmark and calibrate | no | done 2026-11-19 |
+| 3 | Offline render, end to end | no | 10-min clip done (resume, timing, sync by timestamps); full film and playback by eye left |
+| 4 | Streaming in the browser | no | measured over HTTP: 14 s start, **0.81–0.84×** (not real time); browser, Compare, other devices, sleep left |
+| 5 | TensorRT go/no-go | no | done: **NO-GO** (0.82×) |
+| 6 | Settle the open questions in `PLAN.md` | config only | exports, LAN, disk set; 47.95 vs 60 on the TV left |
+| 7 | Jellyfin as the general streaming box | no | not started (install cancelled at the UAC prompt) |
+| 8 | Overnight renders into Jellyfin | small | code and config done; logon task and test with a real film left |
 
 Pick one test film and use it throughout so the numbers are comparable. `PLAN.md` uses `E:\Movies\Batman Begins.mp4` (1920×800, 23.976 fps); the commands below assume it as `$movie`.
 
@@ -37,7 +37,7 @@ $movie = "E:\Movies\Batman Begins.mp4"
 
 ## 1. Environment and self-check
 
-- [ ] If `..\.framegen` does not exist, create it (Python 3.11) and install, exactly as in `README-StreamerFrames.md` "Setup":
+- [x] If `..\.framegen` does not exist, create it (Python 3.11) and install, exactly as in `README-StreamerFrames.md` "Setup":
   ```powershell
   py -3.11 -m venv ..\.framegen
   ..\.framegen\Scripts\Activate.ps1
@@ -45,34 +45,39 @@ $movie = "E:\Movies\Batman Begins.mp4"
   pip install -r requirements-streamerframes.txt
   ```
   The `cu126` wheels matter: newer CUDA builds dropped the 1080 Ti.
-- [ ] `ffmpeg -hide_banner -encoders | Select-String nvenc` lists `h264_nvenc`.
-- [ ] The RIFE model is in `train_log\` (`IFNet_HDv3.py` and `flownet.pkl`, version 4.25). Optional: put `4.25.lite` in `models\4.25.lite\` so step 2 can compare it.
-- [ ] `copy streamerframes.example.toml streamerframes.toml`, then edit `movies_roots`, `cache_root`, `model_dir` and `models_dir` to the real paths.
-- [ ] `python -m streamerframes check` passes.
-- [ ] `pytest` passes (CPU only, about a minute).
-- [ ] Close other GPU programs (Ollama, LM Studio, games) before measuring anything below. Check with `nvidia-smi`.
+- [x] `ffmpeg -hide_banner -encoders | Select-String nvenc` lists `h264_nvenc`.
+- [x] The RIFE model is in `train_log\` (`IFNet_HDv3.py` and `flownet.pkl`, version 4.25). Optional: put `4.25.lite` in `models\4.25.lite\` so step 2 can compare it.
+- [x] `copy streamerframes.example.toml streamerframes.toml`, then edit `movies_roots`, `cache_root`, `model_dir` and `models_dir` to the real paths.
+- [x] `python -m streamerframes check` passes.
+- [x] `pytest` passes (CPU only, about two and a half minutes on this PC: 182 passed, 1 skipped).
+- [x] Close other GPU programs (Ollama, LM Studio, games) before measuring anything below. Check with `nvidia-smi`.
 
 **Done when:** `check` prints no failures and `pytest` is green.
+
+Notes: `4.25.lite` is not installed, so `--model all` measured only the default model. The `flownet.pkl` warning
+"ignoring 40 unexpected keys" is the training-only `teacher` network in the 4.25 checkpoint and is harmless.
 
 ## 2. Benchmark and calibrate
 
 `scale = "auto"` and `model = "auto"` choose from `cache\calibration.json`; without it they fall back to a guess.
 
-- [ ] Run:
+- [x] Run:
   ```powershell
   python -m streamerframes bench $movie --crop --model all
   python -m streamerframes bench --size 1920x1080 --model all
   python -m streamerframes bench --size 1280x720 --model all
   ```
-- [ ] Copy the numbers into this table (`python -m streamerframes report` prints them as a table). A 23.976 fps film at 2× needs 24 interpolations per second for real time; the `realtime` profile wants 1.1× that, so 26.4.
+- [x] Copy the numbers into this table (`python -m streamerframes report` prints them as a table). A 23.976 fps film at 2× needs 24 interpolations per second for real time; the `realtime` profile wants 1.1× that, so 26.4.
 
 | Size | Model | Scale | CUDA graphs | ms/frame | Interpolations/s | Real time for 24p 2×? |
 |---|---|---|---|---|---|---|
-| 1920×800 | default | 1.0 | | | | |
-| 1920×800 | default | 0.5 | | | | |
-| 1920×1080 | default | 1.0 | | | | |
-| 1920×1080 | default | 0.5 | | | | |
-| 1280×720 | default | 1.0 | | | | |
+| 1920×800 | default | 1.0 | yes | 46.2 | 21.6 | no |
+| 1920×800 | default | 0.5 | yes | 33.5 | 29.9 | yes |
+| 1920×1080 | default | 1.0 | yes | 60.6 | 16.5 | no |
+| 1920×1080 | default | 0.5 | yes | 42.4 | 23.6 | no |
+| 1280×720 | default | 1.0 | yes | 30.0 | 33.3 | yes |
+
+Without CUDA graphs: 46.8 / 33.8 / 61.4 / 43.1 / 30.0 ms. `Batman Begins.mp4` is 1920×800 with nothing to crop.
 
 Compare with the model-only numbers in `PLAN.md` section 2 (49.5 ms at 1920×832 scale 1.0, 35.4 ms at scale 0.5, measured without CUDA graphs). Much slower than that means something else is using the GPU.
 
@@ -82,41 +87,47 @@ Compare with the model-only numbers in `PLAN.md` section 2 (49.5 ms at 1920×832
 
 This is the "watch at 60 fps" path: a true 59.94 fps file, generated unattended.
 
-- [ ] Preview what will be produced: `python -m streamerframes plan $movie --target-fps 60`
-- [ ] Render a short film or clip first (10 minutes is enough), then the full test film:
+- [x] Preview what will be produced: `python -m streamerframes plan $movie --target-fps 60`
+- [ ] Render a short film or clip first (10 minutes is enough), then the full test film (clip done: 20:00–30:00 of the film; full film not yet, ≈ 6 h):
   ```powershell
   python -m streamerframes render $movie --profile quality
   ```
   The progress line shows source fps and the ratio to real time. Note both.
-- [ ] Resume test: press Ctrl+C once mid-render, wait for it to stop after the current segment, run the same command again. It must continue, not restart.
-- [ ] Check the export: plays in a normal player, `python -m streamerframes probe <export>` shows 60000/1001 fps and the same duration as the source, audio is in sync at the start, the middle and the end, subtitles are present.
-- [ ] `python -m streamerframes cache ls` shows the generation as `complete`.
+- [x] Resume test (done with the cache's `stop` file, the same graceful stop Ctrl+C requests: paused after 41 of 150 segments, the rerun did segments [41, 150)): press Ctrl+C once mid-render, wait for it to stop after the current segment, run the same command again. It must continue, not restart.
+- [ ] Check the export (by tools: 60000/1001 fps, 600.15 s vs 600.17 s source, all 35,973 frames exactly 1001/60 ms apart, audio copied and starting at 0; the clip has no subtitles. Watching it in a player is left): plays in a normal player, `python -m streamerframes probe <export>` shows 60000/1001 fps and the same duration as the source, audio is in sync at the start, the middle and the end, subtitles are present.
+- [x] `python -m streamerframes cache ls` shows the generation as `complete`.
 
 | Film | Profile | Source fps processed | × real time | Total render time | Export size |
 |---|---|---|---|---|---|
-| | quality (60) | | | | |
+| Batman Begins, 10 min clip | quality (60) | 8.8–9.1 | 0.37 | 27 min (+2 min HEVC re-export) | 1.84 GB H.264 / 1.0 GB HEVC |
 
 **Done when:** a full film exports, survives a resume, and plays in sync.
 
+Exports are large: `quality` is cq 18 with a 40M cap, about 24.5 Mbit/s here, so ≈ 26 GB per film. `--export-codec
+hevc` halves it. Decide which before queueing the library in step 8.
+
 ## 4. Streaming in the browser
 
-- [ ] `start_server.bat`, open http://localhost:8000, find the test film in the library.
-- [ ] Click **Framegen**. Note the seconds until playback starts, and the speed (× real time) in the status line. `PLAN.md` section 8 expects a start within about 20 s and at least 1.0× for a 1920×800 film.
-- [ ] Seek far ahead of what has been generated. Playback should resume there after a short wait; afterwards the holes get filled in the background.
+- [x] `start_server.bat`, open http://localhost:8000, find the test film in the library.
+- [ ] Click **Framegen** (measured through the same HTTP API; watching it in a browser is left). Note the seconds until playback starts, and the speed (× real time) in the status line. `PLAN.md` section 8 expects a start within about 20 s and at least 1.0× for a 1920×800 film.
+- [x] Seek far ahead of what has been generated. Playback should resume there after a short wait; afterwards the holes get filled in the background.
 - [ ] **Compare** shows the original and the framegen version side by side, in sync.
-- [ ] Restart the server mid-generation (`stop_server.bat`, `start_server.bat`). The job should be adopted or resumed.
+- [x] Restart the server mid-generation (`stop_server.bat`, `start_server.bat`). The job should be adopted or resumed.
 - [ ] From another device: set `host = "0.0.0.0"` in `streamerframes.toml`, add the LAN-only firewall rule from `README-StreamerFrames.md`, and open `http://<pc-ip>:8000` on a phone or the TV's browser. There is no login, so keep it on the home network.
 - [ ] Sleep check: confirm the README's description ("Web UI") on the real machine. Set the sleep timeout to 5 minutes, play a finished film from another device for 15 minutes (the PC must stay awake), then pause it (it should sleep about 2 minutes plus the timeout later). Try it with **Original** too, since a browser may buffer a whole file and stop fetching. Restore your sleep timeout afterwards.
 
 | Check | Result |
 |---|---|
-| Seconds to first frame | |
-| Stream speed, × real time | |
-| Scale and model chosen by `auto` | |
-| Seek ahead works | |
-| Stays awake during remote playback | |
+| Seconds to first frame | 14 s to segment 0 (PLAN: ≈ 20 s) |
+| Stream speed, × real time | **0.81–0.84** (19.5–20 source fps; PLAN: ≥ 1.0). GPU ~71% busy, CPU at 100% (worker ~5 cores, encoder ffmpeg ~2.4) |
+| Scale and model chosen by `auto` | scale 0.5, default model |
+| Seek ahead works | yes: segment at 1 h served after 14 s |
+| Stays awake during remote playback | not tested yet |
 
-- [ ] Write the numbers from steps 2–4 into the "Measured performance" section of `README-StreamerFrames.md` (`python -m streamerframes report --markdown` prints the tables).
+Because the stream runs below real time, the page waits for a lead of about 18% of the remaining film before it
+starts (≈ 30 min for a whole film). Lowering the worker's CPU cost is the next speed-up to look at.
+
+- [x] Write the numbers from steps 2–4 into the "Measured performance" section of `README-StreamerFrames.md` (`python -m streamerframes report --markdown` prints the tables).
 
 **Done when:** a film streams without stalling on another device, and the README's performance section is no longer empty.
 
@@ -124,32 +135,34 @@ This is the "watch at 60 fps" path: a true 59.94 fps file, generated unattended.
 
 One experiment, then a decision. TensorRT 8.6 is the last version that supports the 1080 Ti.
 
-- [ ] Install the optional packages (`requirements-streamerframes.txt` has the exact lines, including the TensorRT 8.6 wheel).
-- [ ] Run:
+- [x] Install the optional packages (`requirements-streamerframes.txt` has the exact lines, including the TensorRT 8.6 wheel).
+- [x] Run:
   ```powershell
   python -m streamerframes trt export  $movie --crop
   python -m streamerframes trt build   $movie --crop
   python -m streamerframes trt compare $movie --crop
   ```
-- [ ] `compare` prints GO or NO-GO. GO means at least 1.25× faster than PyTorch with CUDA graphs, at 45 dB PSNR or better.
+- [x] `compare` prints GO or NO-GO. GO means at least 1.25× faster than PyTorch with CUDA graphs, at 45 dB PSNR or better.
 
 | PyTorch ms | TensorRT ms | Speedup | PSNR | Verdict |
 |---|---|---|---|---|
-| | | | | |
+| 46.0 | 56.2 | 0.82× | 124.8 dB | NO-GO |
 
-- [ ] If GO: set `backend = "tensorrt"` in the `realtime` profile and repeat step 4's speed measurement. If NO-GO: leave it off and record the numbers in `README-StreamerFrames.md` under "TensorRT".
+- [x] If GO: set `backend = "tensorrt"` in the `realtime` profile and repeat step 4's speed measurement. If NO-GO: leave it off and record the numbers in `README-StreamerFrames.md` under "TensorRT".
 
 **Done when:** the verdict and numbers are written down. Either outcome closes this step.
+
+Running it on Windows needed three DLL folders on `PATH`; see "TensorRT" in `README-StreamerFrames.md`.
 
 ## 6. Settle the open questions in `PLAN.md`
 
 `PLAN.md` section 7 ends with four questions that were answered by default. Decide them now that there are real numbers, and set the config to match.
 
 - [ ] **2× (47.95 fps) for streaming, true 60 only offline?** Watch ten minutes of each on your actual TV. If the 47.95 cadence bothers you on a 60 Hz screen, plan to watch pre-rendered `quality` files (step 8) and use streaming only for previews.
-- [ ] **Where exports go.** For step 7, set `export_dir` to a folder of its own that is not inside `movies_roots`, for example `E:/Media/Framegen`.
-- [ ] **LAN access.** `host = "0.0.0.0"` if step 4 worked from other devices.
+- [x] **Where exports go.** Set to `E:/Media/Framegen` with `export_layout = "library"`. For step 7, set `export_dir` to a folder of its own that is not inside `movies_roots`, for example `E:/Media/Framegen`.
+- [x] **LAN access.** Already `0.0.0.0`; the firewall rule is still missing (step 4). `host = "0.0.0.0"` if step 4 worked from other devices.
 - [ ] **Pre-generate overnight?** Decided in step 8.
-- [ ] Disk: a 1080p film takes roughly 5–10 GB of cache. Set `cache_max_gb` to what the drive can spare.
+- [x] Disk (E: has 2 TB free; `cache_max_gb = 200` kept): a 1080p film takes roughly 5–10 GB of cache. Set `cache_max_gb` to what the drive can spare.
 
 **Done when:** `streamerframes.toml` reflects the answers, and they are noted here.
 
